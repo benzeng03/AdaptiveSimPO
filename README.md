@@ -81,7 +81,37 @@ The development pairs are used only to choose the fixed γ; generation results a
 
 ## Results
 
-Not yet available: the first full run is in progress. This section will be updated when it finishes.
+Run `outputs/run-bs8-seed42-20261119-233225` (2026-11-19, default settings above; full table in its `results.md`).
+
+**Development pairs (baseline selection).**
+
+| Variant | Train mean γ | Normal-ref mean γ | Train active | Normal-ref active | Dev accuracy | Dev log-loss |
+|---|---:|---:|---:|---:|---:|---:|
+| base (untrained) | — | — | — | — | 33/64 | 0.7161 |
+| fixed-g0 | 0 | 0 | 0% | 0% | 33/64 | **0.7195** |
+| fixed-g0.25 | 0.25 | 0.25 | 100% | 100% | 33/64 | 0.7232 |
+| fixed-g0.5 | 0.5 | 0.5 | 100% | 100% | 33/64 | 0.7217 |
+| fixed-g0.75 | 0.75 | 0.75 | 100% | 100% | 33/64 | 0.7228 |
+| fixed-g1 | 1 | 1 | 100% | 100% | 33/64 | 0.7223 |
+| erf-zero-g2 | 0.302 | 0.383 | 41.8% | 39.8% | 33/64 | 0.7199 |
+
+All fixed margins tie on accuracy, so the log-loss tie-break selects `fixed-g0` as the baseline.
+
+**Generation (PairRM, 64 AlpacaEval prompts).**
+
+| Comparison | Wins / ties / losses | Win rate (95% CI) |
+|---|---:|---:|
+| erf-zero-g2 vs fixed-g0 | 23 / 15 / 26 | 47.66% (36.72%–58.59%) |
+| fixed-g0 vs GPT-4 reference | 2 / 1 / 61 | 3.91% |
+| erf-zero-g2 vs GPT-4 reference | 2 / 1 / 61 | 3.91% |
+
+Mean answer length was 268 tokens for fixed-g0 and 276 for erf-zero-g2. No answer hit the 4096-token limit, and 10 of the 64 answer pairs were identical.
+
+**Reading the results.**
+
+- **No detectable difference.** The head-to-head interval contains 50%, so this run shows no difference between the adaptive and the tuned fixed margin.
+- **Training barely moved the policy.** On every development pair, each trained adapter ranks the chosen and rejected answers exactly as the untrained base model does. Every trained adapter also has a slightly higher dev log-loss than the base model. The choice of fixed γ therefore rests on log-loss differences of about 0.004, and with 32 LoRA updates at lr 5e-5 the comparison has little power.
+- **Normal assumption check.** Averaged over the 32 steps, the observed fraction of nonzero margins is within 2 points of the normal prediction (step-level SD 10 points). The mean margin is 0.08 lower than predicted (0.302 vs 0.383). The batch std averages 2.34 and some batches contain large outliers (std up to about 11). This is consistent with heavy tails inflating $s_B$ and shrinking the standardised errors, but this run does not test that explanation.
 
 ## Repository layout
 
