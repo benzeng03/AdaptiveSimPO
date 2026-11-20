@@ -6,3 +6,4 @@ outputs/
 *.tmp
 models/
 papers/
+data/ultrafeedback_binarized/

@@ -2,13 +2,13 @@
 
 > STATS 425（大模型课）final project。**每次修改代码、跑完实验或得出新结论后，都要同步更新本文件**（尤其是“实验记录”和“状态 / 待办”两节），并写明日期。
 
-最后更新：2026-11-19（第一次正式结果）
+最后更新：2026-11-20
 
 ## 1. 研究问题
 
 固定 SimPO 对所有偏好对使用同一个目标 margin γ。本项目检验：在**模型、训练数据、shuffle 顺序、LoRA 初始化和优化预算都相同**的条件下，按样本难度分配 margin（**零阈值 erf**：只给模型当前排错的样本额外 margin，大小按困难百分位确定），能否比**调过参的固定 margin**（γ∈{0, 0.25, 0.5, 0.75, 1}，在 dev 集上选）得到更好的生成回答。
 
-理论推导见 [discussion.txt](discussion.txt)，英文说明见 [README.md](README.md)。**README.md 用英文写，不提前序项目，每次改动后同步更新。**
+理论推导的原始讨论在 [discussion.txt](discussion.txt)（中文），完整理论现在写在 [README.md](README.md) 的 Method 一节。**README.md 用英文写，不提前序项目，也不提 discussion.txt，每次改动后同步更新。**
 
 ## 2. 背景论文
 
@@ -28,7 +28,7 @@
 
 - s_B 默认为 batch 总体标准差（除以 B，`--std-correction 0`）；std=0 时用 eps。
 - 2026-11-19 按用户要求删除了均值阈值 erf、均值阈值 tanh 和 AMaPO 三个选项，代码中只保留以上两种规则。
-- 正态假设（discussion.txt 后半部分）：R~N(μ,σ²) 时，Z-score 是自然的归一化方式（median/IQR 只差常数 1.349）；要求 margin 与困难百分位成正比，就唯一确定了 erf 映射；均值阈值下 E[γ]=γ_max/4。在零阈值下，激活比例为 Φ(−μ/σ)，只有 μ=0 时才回到 γ_max/4。
+- 正态假设：R~N(μ,σ²) 时，要求 margin 与困难百分位成正比，就唯一确定了 erf 映射；均值阈值下 E[γ]=γ_max/4。在零阈值下，激活比例为 Φ(−μ/σ)，只有 μ=0 时才回到 γ_max/4。
 - batch size 只有 8，所以每一步都记录实际的 `active`、`gamma_mean`，以及用该 batch 的 (r̄, s) 算出的正态参照 `ref_active`、`ref_gamma_mean`（数值积分）。
 
 ## 4. 代码结构
@@ -42,7 +42,7 @@
 | `generate.py` | 多个 adapter 在同一组 AlpacaEval 提示上采样（每组用相同的种子），按组缓存 |
 | `judge.py` | PairRM 双向判定，比较各变体 vs 基线和 vs GPT-4 参考，给出 bootstrap 95% CI |
 | `summarize.py` | 汇总为 `RUN/results.md` |
-| `run_experiment.ps1` | 一键完成全流程；所有 Python 调用都经过 `Invoke-Python`（stderr 转成文本，只按退出码判断成败）。生成阶段只包括 dev 选出的固定基线和全部 erf-zero 变体 |
+| `run_experiment.ps1` | 一键完成全流程（`-LearningRate`、`-Epochs`，run 目录名会记录 lr 和 epoch）；所有 Python 调用都经过 `Invoke-Python`（stderr 转成文本，只按退出码判断成败）。生成阶段只包括 dev 选出的固定基线和全部 erf-zero 变体 |
 | `tests/` | 公式和梯度的单元测试；tiny Qwen3 在 CPU 上的端到端冒烟测试 |
 | `data/`、`third_party/llm_blender/` | 数据（训练 256 对 / dev 64 对 / AlpacaEval 参考答案）；PairRM 模型定义 |
 | `models/`、`papers/`、`.venv/`、`outputs/` | 本地文件，不入库：Qwen3-0.6B 和 PairRM 权重、SimPO.pdf、Python 环境（3.14，torch 2.12.1+cu130，transformers 5.23，peft 0.21.3，见 `requirements.txt`）、实验输出 |
@@ -78,6 +78,12 @@
   - 生成（PairRM，64 个提示）：erf-zero-g2 vs fixed-g0 为 23 胜 / 15 平 / 26 负，WR 47.66%（CI 36.72–58.59%），**没有显著差异**。两者对 GPT-4 参考的 WR 都是 3.91%；平均长度 276 / 268 token；没有回答被 4096 上限截断；64 对回答中有 10 对完全相同。
   - **关键诊断**：每个 adapter 在 64 个 dev 对上的排序方向都和 base 模型完全一致。32 步 LoRA（lr 5e-5）几乎没有改变策略，所以这次比较的统计功效很低，固定 γ 的选择只取决于约 0.004 的 logloss 噪声。
   - 正态假设检验（erf-zero-g2，32 步）：实际激活比例比正态参照平均高 2.0 个百分点（逐步 SD 10.4）；实际平均 γ 比参照平均低 0.081（0.302 vs 0.383）。batch std 平均为 2.34，偶尔出现 std≈11 的离群 batch，这与重尾分布抬高 s_B、压低 u 的解释一致（未检验）。
+- **2026-11-20 第二次运行（进行中）**：lr 1e-4，2 epoch（64 步），其余设置不变。目录 `outputs/run-bs8-lr0.0001-ep2-seed42-20261120-000612`，日志 `outputs/experiment-lr1e-4-ep2-20261120-000612.log`。结果待补。
+
+### 数据来源（2026-11-20 核实）
+- SimPO 的 Base 设置用 `HuggingFaceH4/ultrafeedback_binarized`：`train_prefs` 用于训练，`test_prefs` 用于评估（官方配置 `dataset_splits: [train_prefs, test_prefs]`）。Instruct 设置用 on-policy 数据 `princeton-nlp/mistral-instruct-ultrafeedback`、`princeton-nlp/llama3-ultrafeedback`（由 PairRM 标注）；v0.2 用 `princeton-nlp/llama3-ultrafeedback-armorm`。
+- 官方两个分片（61,135 / 2,000 对）已从 `../SemanticAMaPO` 复制到 `data/ultrafeedback_binarized/`（不入库，train 有 226 MB）。
+- 已核实：`data/uf_original_train.jsonl` 的 256 对和 `uf_original_test.jsonl` 的 64 对，都是对应官方分片的精确子集（prompt 去掉了首尾空白）。Instruct 用的 on-policy 数据集本地没有，下载需要用户同意。
 
 ## 7. 状态 / 待办
 
@@ -93,4 +99,4 @@
 - 代码注释和 CLI 用英文；本文件和面向用户的总结用中文。
 - `outputs/` 不入库（见 `.gitignore`）。实验结论要摘要写进本文件。
 - 修改 margin 公式时，必须同时更新 `tests/test_margins.py`、第 3 节的表格和 README 的 Method 一节。
-- README.md 保持全英文，不提前序项目 RobustSimPO。
+- README.md 保持全英文，不提前序项目 RobustSimPO，不提 discussion.txt，不讨论 tanh 和归一化方式的选择（2026-11-20 用户要求）。奖励写成 β/|y|·log π_θ(y|x)，softplus 和 sigmoid 都写出表达式。

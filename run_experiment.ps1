@@ -20,6 +20,7 @@ param(
     [int]$BatchSize = 8,
     [int]$Seed = 42,
     [double]$LearningRate = 0.00005,
+    [ValidateRange(1, 100)][int]$Epochs = 1,
     [double]$Beta = 2,
     [int]$NumPrompts = 64,
     [int]$MaxNewTokens = 4096,
@@ -54,7 +55,8 @@ if (!$Python) { $Python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe" }
 if (!(Test-Path -LiteralPath $Python -PathType Leaf)) { throw "Missing Python interpreter: $Python (pass -Python)" }
 if (!$RunDir) {
     if ($EvalOnly) { throw "-EvalOnly needs -RunDir" }
-    $RunDir = Join-Path $PSScriptRoot "outputs\run-bs$BatchSize-seed$Seed-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+    $lrTag = $LearningRate.ToString("R", $inv)
+    $RunDir = Join-Path $PSScriptRoot "outputs\run-bs$BatchSize-lr$lrTag-ep$Epochs-seed$Seed-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 }
 $plan = @($Variants | ForEach-Object { Convert-Variant $_ })
 $names = @($plan | ForEach-Object { $_.Name })
@@ -69,7 +71,7 @@ try {
         Invoke-Python -c "import torch; assert torch.cuda.is_available(); print(torch.__version__, torch.cuda.get_device_name(0))"
         New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
         $common = @("--batch-size", "$BatchSize", "--seed", "$Seed", "--lr", $LearningRate.ToString("R", $inv),
-                    "--beta", $Beta.ToString("R", $inv), "--epochs", "1", "--max-length", "384", "--max-prompt", "192")
+                    "--beta", $Beta.ToString("R", $inv), "--epochs", "$Epochs", "--max-length", "384", "--max-prompt", "192")
         foreach ($item in $plan) {
             $out = Join-Path $RunDir $item.Name
             if (Test-Path -LiteralPath (Join-Path $out "margin_stats.json")) { Write-Host "Skip trained $($item.Name)"; continue }
