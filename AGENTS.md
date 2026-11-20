@@ -78,7 +78,7 @@
   - 生成（PairRM，64 个提示）：erf-zero-g2 vs fixed-g0 为 23 胜 / 15 平 / 26 负，WR 47.66%（CI 36.72–58.59%），**没有显著差异**。两者对 GPT-4 参考的 WR 都是 3.91%；平均长度 276 / 268 token；没有回答被 4096 上限截断；64 对回答中有 10 对完全相同。
   - **关键诊断**：每个 adapter 在 64 个 dev 对上的排序方向都和 base 模型完全一致。32 步 LoRA（lr 5e-5）几乎没有改变策略，所以这次比较的统计功效很低，固定 γ 的选择只取决于约 0.004 的 logloss 噪声。
   - 正态假设检验（erf-zero-g2，32 步）：实际激活比例比正态参照平均高 2.0 个百分点（逐步 SD 10.4）；实际平均 γ 比参照平均低 0.081（0.302 vs 0.383）。batch std 平均为 2.34，偶尔出现 std≈11 的离群 batch，这与重尾分布抬高 s_B、压低 u 的解释一致（未检验）。
-- **2026-11-20 第二次运行（进行中）**：lr 1e-4，2 epoch（64 步），其余设置不变。目录 `outputs/run-bs8-lr0.0001-ep2-seed42-20261120-000612`，日志 `outputs/experiment-lr1e-4-ep2-20261120-000612.log`。结果待补。
+- **2026-11-20 第二次运行（进行中）**：lr 1e-4，2 epoch（64 步），其余设置不变。目录 `outputs/run-bs8-lr0.0001-ep2-seed42-20261120-000613`，日志 `outputs/experiment-lr1e-4-ep2-20261120-000612.log`。结果待补。
 
 ### 数据来源（2026-11-20 核实）
 - SimPO 的 Base 设置用 `HuggingFaceH4/ultrafeedback_binarized`：`train_prefs` 用于训练，`test_prefs` 用于评估（官方配置 `dataset_splits: [train_prefs, test_prefs]`）。Instruct 设置用 on-policy 数据 `princeton-nlp/mistral-instruct-ultrafeedback`、`princeton-nlp/llama3-ultrafeedback`（由 PairRM 标注）；v0.2 用 `princeton-nlp/llama3-ultrafeedback-armorm`。
