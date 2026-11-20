@@ -83,7 +83,7 @@
 ### 数据来源（2026-11-20 核实）
 - SimPO 的 Base 设置用 `HuggingFaceH4/ultrafeedback_binarized`：`train_prefs` 用于训练，`test_prefs` 用于评估（官方配置 `dataset_splits: [train_prefs, test_prefs]`）。Instruct 设置用 on-policy 数据 `princeton-nlp/mistral-instruct-ultrafeedback`、`princeton-nlp/llama3-ultrafeedback`（由 PairRM 标注）；v0.2 用 `princeton-nlp/llama3-ultrafeedback-armorm`。
 - 官方两个分片（61,135 / 2,000 对）已从 `../SemanticAMaPO` 复制到 `data/ultrafeedback_binarized/`（不入库，train 有 226 MB）。
-- **训练并没有用全量数据**：目前所有实验只用 256 对的子集（约占 `train_prefs` 的 0.4%）。要用全量的 61,135 对，需要写一个把 parquet 转成 JSONL 的脚本。按现在的速度（约 1 秒/步，bs8），1 个 epoch 约 7,600 步，大约 2 小时/变体。
+- **训练并没有用全量数据**：目前所有实验只用 256 对的子集（约占 `train_prefs` 的 0.4%）。要用全量的 61,135 对，需要写一个把 parquet 转成 JSONL 的脚本。按现在的速度（约 2.1 秒/步，bs8，RTX 4060），1 个 epoch 约 7,640 步，每个变体大约 4.5 小时。
 - 已核实：`data/uf_original_train.jsonl` 的 256 对和 `uf_original_test.jsonl` 的 64 对，都是对应官方分片的精确子集（prompt 去掉了首尾空白）。Instruct 用的 on-policy 数据集本地没有，下载需要用户同意。
 
 ## 7. 状态 / 待办
