@@ -90,7 +90,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("generations", type=Path)
     p.add_argument("--baseline", required=True, help="policy name used for head-to-head comparisons")
-    p.add_argument("--judge", type=Path, default=HERE.parent / "PairRM")
+    p.add_argument("--judge", type=Path, default=HERE / "models/PairRM")
     p.add_argument("--eval-data", type=Path, default=HERE / "data/alpaca_eval_gpt4_baseline.json")
     p.add_argument("--device", choices=("cuda", "cpu"), default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args(argv)

@@ -6,7 +6,7 @@ prompt are excluded. Completed groups are cached as OUT/<group>-<name>.json and
 reused on rerun.
 
     python generate.py --output outputs/run/generations \
-        --adapter fixed=outputs/run/fixed-g0.5 --adapter erf-mean=outputs/run/erf-mean-g2 [--base]
+        --adapter fixed-g0.5=outputs/run/fixed-g0.5 --adapter erf-zero-g2=outputs/run/erf-zero-g2 [--base]
 """
 import argparse
 import json
@@ -41,7 +41,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--adapter", action="append", default=[], metavar="NAME=PATH")
     p.add_argument("--base", action="store_true", help="also generate with the untrained model")
-    p.add_argument("--model", default=str(HERE.parent / "Qwen3-0.6B"))
+    p.add_argument("--model", default=str(HERE / "models/Qwen3-0.6B"))
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--eval-data", type=Path, default=HERE / "data/alpaca_eval_gpt4_baseline.json")
     p.add_argument("--train-data", type=Path, default=HERE / "data/uf_original_train.jsonl")

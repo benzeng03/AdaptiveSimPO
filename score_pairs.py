@@ -33,11 +33,15 @@ def main(argv=None):
     p.add_argument("--data", type=Path, default=HERE / "data/uf_original_test.jsonl")
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--no-base", action="store_true", help="skip scoring the untrained base model")
+    p.add_argument("--adapters", nargs="+", help="only score these adapter directory names")
     args = p.parse_args(argv)
     rows = read_jsonl(args.data)
     if not rows:
         p.error("empty development dataset")
-    dirs = sorted(d for d in args.run.iterdir() if d.is_dir() and is_adapter_dir(d))
+    dirs = sorted(d for d in args.run.iterdir() if d.is_dir() and is_adapter_dir(d)
+                  and (not args.adapters or d.name in args.adapters))
+    if args.adapters and len(dirs) != len(set(args.adapters)):
+        p.error(f"missing adapters: {sorted(set(args.adapters) - {d.name for d in dirs})}")
     if not dirs:
         p.error(f"no trained adapters under {args.run}")
     cfgs = {d.name: json.loads((d / "training_args.json").read_text(encoding="utf-8")) for d in dirs}

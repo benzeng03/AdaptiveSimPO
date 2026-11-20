@@ -6,18 +6,17 @@ then generate AlpacaEval answers and judge them with PairRM.
 .EXAMPLE
 .\run_experiment.ps1 -WhatIf
 .\run_experiment.ps1
-.\run_experiment.ps1 -Variants "fixed:0.5","erf-mean:2" -SkipEval
-.\run_experiment.ps1 -RunDir outputs\run-20261120-0100 -EvalOnly
+.\run_experiment.ps1 -Variants "fixed:0.5","erf-zero:2" -SkipEval
+.\run_experiment.ps1 -RunDir outputs\run-bs8-seed42-20261120-010000 -EvalOnly
 
-Variant specs:  fixed:<gamma> | erf-zero:<gamma_max> | erf-mean:<gamma_max>
-                | tanh-zero:<gamma_max> | tanh-mean:<gamma_max> | amapo
+Variant specs:  fixed:<gamma> | erf-zero:<gamma_max>
+Re-running with an existing -RunDir trains only missing variants and reuses cached generations.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string[]]$Variants = @("fixed:0", "fixed:0.25", "fixed:0.5", "fixed:1",
-                            "erf-zero:2", "erf-mean:2", "tanh-mean:2", "amapo"),
+    [string[]]$Variants = @("fixed:0", "fixed:0.25", "fixed:0.5", "fixed:0.75", "fixed:1", "erf-zero:2"),
     [string]$RunDir,
-    [string]$Python = (Join-Path $PSScriptRoot "..\RobustSimPO\.venv\Scripts\python.exe"),
+    [string]$Python = (Join-Path $PSScriptRoot ".venv\Scripts\python.exe"),
     [int]$BatchSize = 8,
     [int]$Seed = 42,
     [double]$LearningRate = 0.00005,
@@ -35,15 +34,11 @@ function Assert-Exit { if ($LASTEXITCODE -ne 0) { throw "Command failed (exit $L
 
 function Convert-Variant([string]$Spec) {
     $kind, $value = $Spec.Split(":", 2)
-    if ($kind -eq "amapo") { return [pscustomobject]@{ Name = "amapo"; Args = @("--margin", "amapo") } }
     if ($null -eq $value) { throw "Variant '$Spec' needs a value, e.g. fixed:0.5" }
     $v = [double]::Parse($value, $inv).ToString("R", $inv)
     if ($kind -eq "fixed") { return [pscustomobject]@{ Name = "fixed-g$v"; Args = @("--margin", "fixed", "--gamma", $v) } }
-    if ($kind -match '^(erf|tanh)-(zero|mean)$') {
-        return [pscustomobject]@{ Name = "$kind-g$v"; Args = @("--margin", "adaptive", "--mapping", $Matches[1],
-                                              "--threshold", $Matches[2], "--gamma-max", $v) }
-    }
-    throw "Unknown variant '$Spec'"
+    if ($kind -eq "erf-zero") { return [pscustomobject]@{ Name = "erf-zero-g$v"; Args = @("--margin", "adaptive", "--gamma-max", $v) } }
+    throw "Unknown variant '$Spec' (use fixed:<gamma> or erf-zero:<gamma_max>)"
 }
 
 if (!(Test-Path -LiteralPath $Python -PathType Leaf)) { throw "Missing Python interpreter: $Python (pass -Python)" }
@@ -51,9 +46,11 @@ if (!$RunDir) {
     if ($EvalOnly) { throw "-EvalOnly needs -RunDir" }
     $RunDir = Join-Path $PSScriptRoot "outputs\run-bs$BatchSize-seed$Seed-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 }
-$plan = $Variants | ForEach-Object { Convert-Variant $_ }
+$plan = @($Variants | ForEach-Object { Convert-Variant $_ })
+$names = @($plan | ForEach-Object { $_.Name })
+if (!($names | Where-Object { $_ -like "fixed-g*" })) { throw "Need at least one fixed:<gamma> variant as the baseline" }
 Write-Host "Run directory: $RunDir"
-Write-Host "Variants: $(($plan | ForEach-Object { $_.Name }) -join ', ')"
+Write-Host "Variants: $($names -join ', ')"
 
 Push-Location -LiteralPath $PSScriptRoot
 try {
@@ -72,7 +69,9 @@ try {
             & $Python -u train.py @common @($item.Args) --output $out
             Assert-Exit
         }
-        & $Python -u score_pairs.py $RunDir
+    }
+    if (!$EvalOnly -or !(Test-Path -LiteralPath (Join-Path $RunDir "selection.json"))) {
+        & $Python -u score_pairs.py $RunDir --adapters @names
         Assert-Exit
     }
     if ($SkipEval) { return }
@@ -80,12 +79,13 @@ try {
     $selection = Get-Content -Raw -LiteralPath (Join-Path $RunDir "selection.json") | ConvertFrom-Json
     $baseline = $selection.best_fixed
     if (!$baseline) { throw "No fixed-margin adapter to use as baseline" }
+    # Generation compares the dev-selected fixed baseline with every adaptive variant.
     $adapterArgs = @()
-    foreach ($dir in Get-ChildItem -LiteralPath $RunDir -Directory) {
-        if (!(Test-Path -LiteralPath (Join-Path $dir.FullName "adapter_model.safetensors"))) { continue }
-        # Generation compares the selected fixed baseline, the mean-matched fixed margin and all adaptive rules.
-        if ($dir.Name -like "fixed-g*" -and $dir.Name -ne $baseline -and $dir.Name -ne "fixed-g0.5") { continue }
-        $adapterArgs += @("--adapter", "$($dir.Name)=$($dir.FullName)")
+    foreach ($name in $names) {
+        if ($name -like "fixed-g*" -and $name -ne $baseline) { continue }
+        $dir = Join-Path $RunDir $name
+        if (!(Test-Path -LiteralPath (Join-Path $dir "adapter_model.safetensors"))) { throw "Missing adapter: $dir" }
+        $adapterArgs += @("--adapter", "$name=$((Resolve-Path -LiteralPath $dir).Path)")
     }
     $gen = Join-Path $RunDir "generations-ae$NumPrompts-seed$Seed"
     if (!$PSCmdlet.ShouldProcess($gen, "Generate and judge with baseline $baseline")) { return }

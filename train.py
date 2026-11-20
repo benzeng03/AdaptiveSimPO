@@ -1,4 +1,4 @@
-"""Train one SimPO policy (fixed, adaptive-percentile or AMaPO margin) on JSONL pairs.
+"""Train one SimPO policy (fixed or zero-threshold erf margin) on JSONL pairs.
 
 Every variant shares the model, data, shuffling order, LoRA initialisation and
 optimiser settings for a given --seed, so only the margin rule differs.
@@ -12,7 +12,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from adaptive_simpo.margins import KINDS, MAPPINGS, THRESHOLDS, MarginConfig, normal_reference, simpo_loss
+from adaptive_simpo.margins import KINDS, MarginConfig, normal_reference, simpo_loss
 from adaptive_simpo.modeling import batch_logps, read_jsonl
 
 HERE = Path(__file__).resolve().parent
@@ -20,14 +20,12 @@ HERE = Path(__file__).resolve().parent
 
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--model", default=str(HERE.parent / "Qwen3-0.6B"))
+    p.add_argument("--model", default=str(HERE / "models/Qwen3-0.6B"))
     p.add_argument("--data", default=str(HERE / "data/uf_original_train.jsonl"))
     p.add_argument("--output", required=True)
     p.add_argument("--margin", choices=KINDS, default="adaptive")
     p.add_argument("--gamma", type=float, default=0.5, help="fixed margin (reward units)")
     p.add_argument("--gamma-max", type=float, default=2.0, help="adaptive margin cap")
-    p.add_argument("--threshold", choices=THRESHOLDS, default="mean")
-    p.add_argument("--mapping", choices=MAPPINGS, default="erf")
     p.add_argument("--std-correction", type=int, choices=(0, 1), default=0)
     p.add_argument("--eps", type=float, default=1e-6)
     p.add_argument("--beta", type=float, default=2.0)
@@ -52,8 +50,7 @@ def build_parser():
 
 def margin_config(args):
     return MarginConfig(kind=args.margin, gamma=args.gamma, gamma_max=args.gamma_max,
-                        threshold=args.threshold, mapping=args.mapping,
-                        std_correction=args.std_correction, eps=args.eps, beta=args.beta)
+                        std_correction=args.std_correction, eps=args.eps)
 
 
 def main(argv=None):

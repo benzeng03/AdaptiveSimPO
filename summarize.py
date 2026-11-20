@@ -34,7 +34,7 @@ def main(argv=None):
              "| Variant | Train mean γ | Normal-ref mean γ | Train active | Normal-ref active | "
              "Dev acc | Dev logloss | Dev mean r | H2H vs baseline (95% CI) | vs GPT-4 ref | Mean tokens |",
              "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
-    names = (["base"] if "base" in dev else []) + list(stats)
+    names = list(dev) if dev else list(stats)  # dev_scores lists exactly the scored variants
     for n in names:
         s, d = stats.get(n, {}), dev.get(n, {})
         h2h = ref = tokens = "—"

@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
-TOKENIZER = ROOT.parent / "Qwen3-0.6B"
+TOKENIZER = ROOT / "models/Qwen3-0.6B"
 
 
 @unittest.skipUnless((TOKENIZER / "tokenizer.json").exists(), "needs the Qwen3-0.6B tokenizer")
@@ -37,25 +37,28 @@ class PipelineSmokeTest(unittest.TestCase):
                       "--max-length", "96", "--max-prompt", "48", "--lr", "1e-3"]
             run = tmp / "run"
             train.main(common + ["--margin", "fixed", "--gamma", "0.5", "--output", str(run / "fixed-g0.5")])
-            train.main(common + ["--margin", "adaptive", "--threshold", "mean", "--output", str(run / "erf-mean-g2")])
-            train.main(common + ["--margin", "amapo", "--max-steps", "1", "--output", str(run / "amapo")])
+            train.main(common + ["--margin", "adaptive", "--gamma-max", "2", "--output", str(run / "erf-zero-g2")])
+            train.main(common + ["--margin", "fixed", "--gamma", "0.75", "--max-steps", "1",
+                                 "--output", str(run / "fixed-g0.75")])
 
-            stats = json.loads((run / "erf-mean-g2" / "margin_stats.json").read_text())
+            stats = json.loads((run / "erf-zero-g2" / "margin_stats.json").read_text())
             self.assertEqual(stats["steps"], 2)
-            self.assertAlmostEqual(stats["normal_ref_gamma_mean"], 0.5, places=3)
-            lines = (run / "erf-mean-g2" / "metrics.jsonl").read_text().splitlines()
+            self.assertEqual(stats["variant"], "erf-zero-g2")
+            self.assertLessEqual(stats["gamma_mean"], 2.0)
+            self.assertIn("normal_ref_active", stats)
+            lines = (run / "erf-zero-g2" / "metrics.jsonl").read_text().splitlines()
             self.assertEqual(len(lines), 2)
 
             dev = tmp / "dev.jsonl"
             dev.write_text("\n".join(json.dumps(r) for r in data[:4]), encoding="utf-8")
             score_pairs.main([str(run), "--data", str(dev), "--batch-size", "2"])
             scores = json.loads((run / "dev_scores.json").read_text())
-            self.assertEqual([s["adapter"] for s in scores], ["base", "amapo", "erf-mean-g2", "fixed-g0.5"])
-            self.assertEqual(json.loads((run / "selection.json").read_text())["best_fixed"], "fixed-g0.5")
+            self.assertEqual([s["adapter"] for s in scores], ["base", "erf-zero-g2", "fixed-g0.5", "fixed-g0.75"])
+            self.assertIn(json.loads((run / "selection.json").read_text())["best_fixed"], ("fixed-g0.5", "fixed-g0.75"))
 
             gen = run / "gen"
             args = ["--model", str(model_dir), "--output", str(gen), "--device", "cpu", "--base",
-                    "--adapter", f"fixed-g0.5={run / 'fixed-g0.5'}", "--adapter", f"erf-mean-g2={run / 'erf-mean-g2'}",
+                    "--adapter", f"fixed-g0.5={run / 'fixed-g0.5'}", "--adapter", f"erf-zero-g2={run / 'erf-zero-g2'}",
                     "--num-prompts", "3", "--group", "2", "--max-new-tokens", "4"]
             generate.main(args)
             files = sorted(p.name for p in gen.glob("*-*.json"))
