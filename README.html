@@ -359,29 +359,38 @@ preference pair gets its own target margin based on how hard the pair
 currently is. The comparison holds everything else fixed: the same
 model, training data, shuffling order, LoRA initialisation and
 optimisation budget. The baseline is a tuned fixed-margin SimPO.</p>
-<p>The theoretical derivation (in Chinese) is in <a href="discussion.txt"><code>discussion.txt</code></a>. This README
-summarises it and documents the code.</p>
 <div id="method" class="section level2">
 <h2>Method</h2>
-<div id="reward-gap-and-margin" class="section level3">
-<h3>Reward gap and margin</h3>
+<div id="simpo-reward-gap-and-loss" class="section level3">
+<h3>SimPO reward gap and loss</h3>
 <p>For prompt <span class="math inline">\(x_i\)</span>, chosen answer
-<span class="math inline">\(y_i^+\)</span> and rejected answer <span class="math inline">\(y_i^-\)</span>, let <span class="math inline">\(\bar\ell_\theta(y\mid x)\)</span> be the mean
-log-probability of the answer tokens. The reward gap is</p>
+<span class="math inline">\(y_i^+\)</span> and rejected answer <span class="math inline">\(y_i^-\)</span>, SimPO uses the length-normalised
+log-likelihood of the policy <span class="math inline">\(\pi_\theta\)</span> as an implicit reward:</p>
 <p><span class="math display">\[
-r_i=\beta\left[\bar\ell_\theta(y_i^+\mid x_i)-\bar\ell_\theta(y_i^-\mid
-x_i)\right].
+\frac{\beta}{|y|}\log\pi_\theta(y\mid
+x)=\frac{\beta}{|y|}\sum_{k=1}^{|y|}\log\pi_\theta(y_k\mid x,y_{&lt;k}),
+\]</span></p>
+<p>where <span class="math inline">\(|y|\)</span> is the number of
+answer tokens. The reward gap of pair <span class="math inline">\(i\)</span> is</p>
+<p><span class="math display">\[
+r_i=\frac{\beta}{|y_i^+|}\log\pi_\theta(y_i^+\mid
+x_i)-\frac{\beta}{|y_i^-|}\log\pi_\theta(y_i^-\mid x_i).
 \]</span></p>
 <p><span class="math inline">\(r_i&gt;0\)</span> means the pair is
 ranked correctly and <span class="math inline">\(r_i&lt;0\)</span> means
-it is misranked. The per-pair SimPO loss is</p>
+it is misranked. With a target margin <span class="math inline">\(\gamma_i\)</span>, the per-pair SimPO loss is</p>
 <p><span class="math display">\[
-L_i=\operatorname{softplus}(\gamma_i-r_i).
+L_i=-\log\sigma(r_i-\gamma_i)=\operatorname{softplus}(\gamma_i-r_i),\qquad
+\sigma(a)=\frac{1}{1+e^{-a}},\quad
+\operatorname{softplus}(a)=\log\left(1+e^{a}\right),
 \]</span></p>
+<p>and the training objective is the batch mean of <span class="math inline">\(L_i\)</span>. Original SimPO uses one constant
+<span class="math inline">\(\gamma_i=\gamma\)</span> for all pairs.</p>
 <p><span class="math inline">\(\gamma_i\)</span> is detached after it is
 computed, so</p>
 <p><span class="math display">\[
-\frac{\partial L_i}{\partial r_i}=-\operatorname{sigmoid}(\gamma_i-r_i).
+\frac{\partial L_i}{\partial
+r_i}=-\sigma(\gamma_i-r_i)=-\frac{1}{1+e^{\,r_i-\gamma_i}}.
 \]</span></p>
 <p>At the same <span class="math inline">\(r_i\)</span>, a larger <span class="math inline">\(\gamma_i\)</span> puts more gradient weight on
 raising that pair’s reward gap. A pair with <span class="math inline">\(\gamma_i=0\)</span> still trains. The hypothesis
@@ -416,93 +425,123 @@ every pair the same margin.</p>
 </tr>
 </tbody>
 </table>
-<p>Here <span class="math inline">\((a)_+=\max(a,0)\)</span> and <span class="math inline">\(s_B\)</span> is the standard deviation of the
-reward gaps in the current batch (divisor <span class="math inline">\(B\)</span> by default,
-<code>--std-correction 1</code> for <span class="math inline">\(B-1\)</span>; <code>--eps</code> replaces a zero
-std). Only misranked pairs get a positive margin. The margin rises with
-the size of the error and never exceeds <span class="math inline">\(\gamma_{\max}\)</span>.</p>
+<p>Here <span class="math inline">\((a)_+=\max(a,0)\)</span>, <span class="math inline">\(\operatorname{erf}(z)=\frac{2}{\sqrt\pi}\int_0^z
+e^{-t^2}\,dt\)</span>, and <span class="math inline">\(s_B\)</span> is
+the standard deviation of the reward gaps in the current batch. The
+divisor is <span class="math inline">\(B\)</span> by default;
+<code>--std-correction 1</code> uses <span class="math inline">\(B-1\)</span>, and <code>--eps</code> replaces a
+zero std. Only misranked pairs get a positive margin. The margin rises
+with the size of the error and never exceeds <span class="math inline">\(\gamma_{\max}\)</span>.</p>
 </div>
-<div id="the-normal-assumption-behind-the-erf-mapping" class="section level3">
-<h3>The normal assumption behind the erf mapping</h3>
+<div id="why-erf-a-normal-model-of-the-reward-gaps" class="section level3">
+<h3>Why erf: a normal model of the reward gaps</h3>
 <p>Assume the reward gaps within one training stage are approximately
 normal, <span class="math inline">\(R\sim\mathcal
-N(\mu,\sigma^2)\)</span>. Standardising one side of the distribution
-gives the difficulty <span class="math inline">\(u=(t-R)_+/\sigma\)</span> for a hardness threshold
-<span class="math inline">\(t\)</span>. Define <span class="math inline">\(Z=(t-R)/\sigma\)</span>. When <span class="math inline">\(t=\mu\)</span>, <span class="math inline">\(Z\sim\mathcal N(0,1)\)</span> and <span class="math inline">\(Z&gt;0\)</span> is the hard half. Require the
+N(\mu,\sigma^2)\)</span>, and call a pair hard when its gap falls below
+a threshold <span class="math inline">\(t\)</span>. The one-sided
+standardised difficulty is</p>
+<p><span class="math display">\[
+u_i=\frac{(t-r_i)_+}{\sigma}.
+\]</span></p>
+<p>The direction is the same for every threshold: <span class="math inline">\(t=0\)</span> gives the numerator <span class="math inline">\((-r_i)_+\)</span>, and <span class="math inline">\(t=\mu\)</span> gives <span class="math inline">\((\mu-r_i)_+\)</span>. Take <span class="math inline">\(t=\mu\)</span> and define <span class="math inline">\(Z=(\mu-R)/\sigma\)</span>. Then <span class="math inline">\(Z\sim\mathcal N(0,1)\)</span> and <span class="math inline">\(Z&gt;0\)</span> is the hard half. Require the
 margin to be proportional to a pair’s percentile within the hard half: a
-pair harder than 80% of hard pairs gets 80% of the maximum margin. That
+pair harder than 80% of the hard pairs gets 80% of the maximum margin.
+For difficulty <span class="math inline">\(u&gt;0\)</span> that
 percentile is</p>
 <p><span class="math display">\[
 P(Z\le u\mid
 Z&gt;0)=\frac{\Phi(u)-1/2}{1/2}=2\Phi(u)-1=\operatorname{erf}\!\left(\frac{u}{\sqrt2}\right),
 \]</span></p>
-<p>so under this requirement erf is the unique mapping. For example, a
-pair one standard deviation below the threshold gets <span class="math inline">\(0.683\,\gamma_{\max}\)</span>. Compared with the
-earlier heuristic <span class="math inline">\(\tanh(u)\)</span>:</p>
+<p>where <span class="math inline">\(\Phi\)</span> is the standard
+normal CDF. Under this requirement erf is the unique mapping:</p>
+<p><span class="math display">\[
+\gamma_i=\operatorname{stopgrad}\!\left[\gamma_{\max}\operatorname{erf}\!\left(\frac{u_i}{\sqrt2}\right)\right].
+\]</span></p>
+<p>For example, a pair one standard deviation below the threshold is
+harder than about 68.3% of the hard half and gets <span class="math inline">\(0.683\,\gamma_{\max}\)</span>; at <span class="math inline">\(2\sigma\)</span> it gets <span class="math inline">\(0.954\,\gamma_{\max}\)</span>.</p>
+<p>Consequences:</p>
+<ul>
+<li><strong>Expected margin.</strong> With <span class="math inline">\(t=\mu\)</span> and known parameters, half the
+pairs get zero margin and the other half have percentiles uniformly
+distributed on <span class="math inline">\([0,1]\)</span>. So <span class="math inline">\(\mathbb
+E[\gamma_i]=\tfrac12\cdot\tfrac12\gamma_{\max}=\gamma_{\max}/4\)</span>;
+for example, <span class="math inline">\(\gamma_{\max}=0.8\)</span>
+gives an average extra margin of 0.2. This gives <span class="math inline">\(\gamma_{\max}\)</span> a direct
+interpretation.</li>
+<li><strong>Zero threshold (used here).</strong> This project uses <span class="math inline">\(t=0\)</span>, so only misranked pairs count as
+hard. Under the normal model, the expected fraction of pairs with a
+nonzero margin is <span class="math inline">\(P(R&lt;0)=\Phi(-\mu/\sigma)\)</span>. The erf
+value is the half-normal percentile of the standardised error <span class="math inline">\(-r_i/\sigma\)</span>. It equals the percentile
+within the hard half exactly when <span class="math inline">\(\mu=0\)</span>, where <span class="math inline">\(\mathbb E[\gamma_i]=\gamma_{\max}/4\)</span>
+again.</li>
+</ul>
+<p>These results rest on two separate assumptions: the reward gaps are
+approximately normal, and the margin should be proportional to the
+hardness percentile. Neither implies that generation quality improves;
+that has to be measured. Training estimates <span class="math inline">\((\mu,\sigma)\)</span> from a batch of only 8
+pairs, using the batch mean <span class="math inline">\(\bar
+r_B\)</span> and std <span class="math inline">\(s_B\)</span>. So every
+step logs the observed fraction of nonzero margins and the mean margin.
+Alongside them it logs the values the normal model predicts from that
+batch’s <span class="math inline">\((\bar r_B, s_B)\)</span>
+(<code>ref_active</code>, <code>ref_gamma_mean</code>), which shows how
+far the batch estimates deviate from the population reference.</p>
+</div>
+</div>
+<div id="data" class="section level2">
+<h2>Data</h2>
+<p>SimPO trains its Base-model settings (Mistral-7B-Base,
+Llama-3-8B-Base) on <a href="https://huggingface.co/datasets/HuggingFaceH4/ultrafeedback_binarized">HuggingFaceH4/ultrafeedback_binarized</a>,
+using the <code>train_prefs</code> split for training and
+<code>test_prefs</code> for evaluation during training
+(<code>dataset_splits: [train_prefs, test_prefs]</code> in the official
+training configs). Its Instruct settings use on-policy UltraFeedback
+variants. In these, the prompts are UltraFeedback’s, the responses are
+sampled from the SFT model and the pairs are ranked by PairRM: <a href="https://huggingface.co/datasets/princeton-nlp/mistral-instruct-ultrafeedback">princeton-nlp/mistral-instruct-ultrafeedback</a>
+and <a href="https://huggingface.co/datasets/princeton-nlp/llama3-ultrafeedback">princeton-nlp/llama3-ultrafeedback</a>.
+The later v0.2 release uses <a href="https://huggingface.co/datasets/princeton-nlp/llama3-ultrafeedback-armorm">princeton-nlp/llama3-ultrafeedback-armorm</a>,
+annotated by ArmoRM.</p>
 <table>
+<colgroup>
+<col width="50%" />
+<col width="50%" />
+</colgroup>
 <thead>
 <tr class="header">
-<th>Position below the threshold</th>
-<th align="right">erf (percentile)</th>
-<th align="right">tanh</th>
+<th>File</th>
+<th>Contents</th>
 </tr>
 </thead>
 <tbody>
 <tr class="odd">
-<td>0</td>
-<td align="right">0</td>
-<td align="right">0</td>
+<td><code>data/ultrafeedback_binarized/train_prefs-00000-of-00001.parquet</code></td>
+<td>Official <code>train_prefs</code> split, 61,135 pairs (local only,
+226 MB)</td>
 </tr>
 <tr class="even">
-<td><span class="math inline">\(0.5\sigma\)</span></td>
-<td align="right">0.383</td>
-<td align="right">0.462</td>
+<td><code>data/ultrafeedback_binarized/test_prefs-00000-of-00001.parquet</code></td>
+<td>Official <code>test_prefs</code> split, 2,000 pairs (local
+only)</td>
 </tr>
 <tr class="odd">
-<td><span class="math inline">\(1\sigma\)</span></td>
-<td align="right">0.683</td>
-<td align="right">0.762</td>
+<td><code>data/uf_original_train.jsonl</code></td>
+<td>256 training pairs: an exact subset of <code>train_prefs</code>
+(prompts whitespace-stripped)</td>
 </tr>
 <tr class="even">
-<td><span class="math inline">\(2\sigma\)</span></td>
-<td align="right">0.954</td>
-<td align="right">0.964</td>
+<td><code>data/uf_original_test.jsonl</code></td>
+<td>64 development pairs: an exact subset of <code>test_prefs</code>,
+prompt-disjoint from the training pairs</td>
+</tr>
+<tr class="odd">
+<td><code>data/alpaca_eval_gpt4_baseline.json</code></td>
+<td>805 AlpacaEval instructions with GPT-4 reference answers, used for
+generation</td>
 </tr>
 </tbody>
 </table>
-<p>The two mappings agree on very hard pairs and differ mainly at
-moderate difficulty.</p>
-<p>Consequences used in this project:</p>
-<ul>
-<li><strong>Choice of normaliser.</strong> Under normality the natural
-scale is the standard deviation. A median/IQR normaliser differs only by
-a constant: for a normal population the median is <span class="math inline">\(\mu\)</span> and <span class="math inline">\(\mathrm{IQR}\approx1.349\,\sigma\)</span>. In
-small batches the two estimators give different values; the code uses
-the batch mean and std.</li>
-<li><strong>Expected margin.</strong> If the threshold equals the mean
-and the parameters are known, half the pairs get zero margin and the
-other half have uniformly distributed percentiles, so <span class="math inline">\(\mathbb E[\gamma_i]=\gamma_{\max}/4\)</span>. For
-example, <span class="math inline">\(\gamma_{\max}=0.8\)</span> gives an
-average extra margin of 0.2. If you care about the maximum increase in
-gradient weight instead, <span class="math inline">\(\gamma_{\max}=4\operatorname{arctanh}(\delta)\)</span>
-controls that directly.</li>
-<li><strong>Zero threshold.</strong> This project uses <span class="math inline">\(t=0\)</span>, so only misranked pairs are hard.
-Under normality the expected fraction of pairs with a nonzero margin is
-<span class="math inline">\(P(R&lt;0)=\Phi(-\mu/\sigma)\)</span>. The
-erf value is still the half-normal percentile of the error <span class="math inline">\((-r_i)/\sigma\)</span>, and it equals the
-percentile within the hard half exactly when <span class="math inline">\(\mu=0\)</span>, where <span class="math inline">\(\mathbb E[\gamma_i]=\gamma_{\max}/4\)</span>
-again.</li>
-</ul>
-<p>These rest on two separate assumptions: the reward gaps are
-approximately normal, and the margin should be proportional to the
-hardness percentile. Neither implies that generation quality improves;
-that has to be measured. Training estimates <span class="math inline">\((\mu,\sigma)\)</span> from a batch of only 8
-pairs. So every step logs the observed fraction of nonzero margins and
-mean margin, alongside the values the normal model predicts from that
-batch’s mean and std (<code>ref_active</code>,
-<code>ref_gamma_mean</code>). These logs show how far the batch
-estimates deviate from the population reference.</p>
-</div>
+<p>The JSONL files keep only the final chosen and rejected assistant
+messages, as <code>{&quot;prompt&quot;, &quot;chosen&quot;, &quot;rejected&quot;}</code>.</p>
 </div>
 <div id="experiment" class="section level2">
 <h2>Experiment</h2>
@@ -526,13 +565,12 @@ checkpointing</td>
 </tr>
 <tr class="even">
 <td>Training data</td>
-<td>256 UltraFeedback preference pairs
-(<code>data/uf_original_train.jsonl</code>)</td>
+<td><code>data/uf_original_train.jsonl</code> (256 pairs)</td>
 </tr>
 <tr class="odd">
 <td>Optimisation</td>
-<td>AdamW, lr 5e-5 constant, β=2, batch 8 pairs, 1 epoch (32 updates),
-seed 42</td>
+<td>AdamW with constant lr, β=2, batch 8 pairs (32 updates per epoch),
+seed 42; lr and epochs per run are listed under Results</td>
 </tr>
 <tr class="even">
 <td>Lengths</td>
@@ -546,11 +584,10 @@ seed 42</td>
 </tr>
 <tr class="even">
 <td>Baseline selection</td>
-<td>64 held-out preference pairs
-(<code>data/uf_original_test.jsonl</code>): highest pairwise accuracy
-(<span class="math inline">\(r&gt;0\)</span>), ties broken by lower mean
-<span class="math inline">\(\operatorname{softplus}(-r)\)</span>, then
-smaller γ</td>
+<td><code>data/uf_original_test.jsonl</code> (64 pairs): highest
+pairwise accuracy (<span class="math inline">\(r&gt;0\)</span>), ties
+broken by lower mean <span class="math inline">\(\operatorname{softplus}(-r)\)</span>, then smaller
+γ</td>
 </tr>
 <tr class="odd">
 <td>Generation</td>
@@ -574,8 +611,150 @@ local proxy, not official AlpacaEval 2 scores.</p>
 </div>
 <div id="results" class="section level2">
 <h2>Results</h2>
-<p>Not yet available: the first full run is in progress. This section
-will be updated when it finishes.</p>
+<div id="run-1-lr-5e-5-1-epoch-32-updates" class="section level3">
+<h3>Run 1: lr 5e-5, 1 epoch (32 updates)</h3>
+<p>Run <code>outputs/run-bs8-seed42-20261119-233225</code> (2026-11-19;
+full table in its <code>results.md</code>).</p>
+<p><strong>Development pairs (baseline selection).</strong></p>
+<table>
+<colgroup>
+<col width="11%" />
+<col width="14%" />
+<col width="14%" />
+<col width="14%" />
+<col width="14%" />
+<col width="14%" />
+<col width="14%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Variant</th>
+<th align="right">Train mean γ</th>
+<th align="right">Normal-ref mean γ</th>
+<th align="right">Train active</th>
+<th align="right">Normal-ref active</th>
+<th align="right">Dev accuracy</th>
+<th align="right">Dev log-loss</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>base (untrained)</td>
+<td align="right">—</td>
+<td align="right">—</td>
+<td align="right">—</td>
+<td align="right">—</td>
+<td align="right">33/64</td>
+<td align="right">0.7161</td>
+</tr>
+<tr class="even">
+<td>fixed-g0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0%</td>
+<td align="right">0%</td>
+<td align="right">33/64</td>
+<td align="right"><strong>0.7195</strong></td>
+</tr>
+<tr class="odd">
+<td>fixed-g0.25</td>
+<td align="right">0.25</td>
+<td align="right">0.25</td>
+<td align="right">100%</td>
+<td align="right">100%</td>
+<td align="right">33/64</td>
+<td align="right">0.7232</td>
+</tr>
+<tr class="even">
+<td>fixed-g0.5</td>
+<td align="right">0.5</td>
+<td align="right">0.5</td>
+<td align="right">100%</td>
+<td align="right">100%</td>
+<td align="right">33/64</td>
+<td align="right">0.7217</td>
+</tr>
+<tr class="odd">
+<td>fixed-g0.75</td>
+<td align="right">0.75</td>
+<td align="right">0.75</td>
+<td align="right">100%</td>
+<td align="right">100%</td>
+<td align="right">33/64</td>
+<td align="right">0.7228</td>
+</tr>
+<tr class="even">
+<td>fixed-g1</td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">100%</td>
+<td align="right">100%</td>
+<td align="right">33/64</td>
+<td align="right">0.7223</td>
+</tr>
+<tr class="odd">
+<td>erf-zero-g2</td>
+<td align="right">0.302</td>
+<td align="right">0.383</td>
+<td align="right">41.8%</td>
+<td align="right">39.8%</td>
+<td align="right">33/64</td>
+<td align="right">0.7199</td>
+</tr>
+</tbody>
+</table>
+<p>All fixed margins tie on accuracy, so the log-loss tie-break selects
+<code>fixed-g0</code> as the baseline.</p>
+<p><strong>Generation (PairRM, 64 AlpacaEval prompts).</strong></p>
+<table>
+<thead>
+<tr class="header">
+<th>Comparison</th>
+<th align="right">Wins / ties / losses</th>
+<th align="right">Win rate (95% CI)</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>erf-zero-g2 vs fixed-g0</td>
+<td align="right">23 / 15 / 26</td>
+<td align="right">47.66% (36.72%–58.59%)</td>
+</tr>
+<tr class="even">
+<td>fixed-g0 vs GPT-4 reference</td>
+<td align="right">2 / 1 / 61</td>
+<td align="right">3.91%</td>
+</tr>
+<tr class="odd">
+<td>erf-zero-g2 vs GPT-4 reference</td>
+<td align="right">2 / 1 / 61</td>
+<td align="right">3.91%</td>
+</tr>
+</tbody>
+</table>
+<p>Mean answer length was 268 tokens for fixed-g0 and 276 for
+erf-zero-g2. No answer hit the 4096-token limit, and 10 of the 64 answer
+pairs were identical.</p>
+<p><strong>Reading the results.</strong></p>
+<ul>
+<li><strong>No detectable difference.</strong> The head-to-head interval
+contains 50%, so this run shows no difference between the adaptive and
+the tuned fixed margin.</li>
+<li><strong>Training barely moved the policy.</strong> On every
+development pair, each trained adapter ranks the chosen and rejected
+answers exactly as the untrained base model does. Every trained adapter
+also has a slightly higher dev log-loss than the base model. The choice
+of fixed γ therefore rests on log-loss differences of about 0.004, and
+with 32 LoRA updates at lr 5e-5 the comparison has little power.</li>
+<li><strong>Normal assumption check.</strong> Averaged over the 32
+steps, the observed fraction of nonzero margins is within 2 points of
+the normal prediction (step-level SD 10 points). The mean margin is 0.08
+lower than predicted (0.302 vs 0.383). The batch std averages 2.34 and
+some batches contain large outliers (std up to about 11). This is
+consistent with heavy tails inflating <span class="math inline">\(s_B\)</span> and shrinking the standardised
+errors, but this run does not test that explanation.</li>
+</ul>
+</div>
 </div>
 <div id="repository-layout" class="section level2">
 <h2>Repository layout</h2>
@@ -639,18 +818,14 @@ smoke test with a tiny random Qwen3</td>
 </tr>
 <tr class="even">
 <td><code>data/</code></td>
-<td>Training pairs, development pairs, AlpacaEval instructions with
-GPT-4 reference answers</td>
+<td>Training and development pairs, official UltraFeedback splits,
+AlpacaEval instructions (see Data)</td>
 </tr>
 <tr class="odd">
 <td><code>third_party/llm_blender/</code></td>
 <td>PairRM model definition and its license</td>
 </tr>
 <tr class="even">
-<td><code>discussion.txt</code></td>
-<td>Theoretical derivation (Chinese)</td>
-</tr>
-<tr class="odd">
 <td><code>models/</code>, <code>papers/</code>, <code>.venv/</code>,
 <code>outputs/</code></td>
 <td>Local only (git-ignored): Qwen3-0.6B and PairRM checkpoints, the
@@ -681,9 +856,13 @@ Python 3.14, NVIDIA GPU with CUDA 13):</p>
 # Other variant sets, more prompts, or evaluating an existing run
 .\run_experiment.ps1 -Variants &quot;fixed:0.5&quot;,&quot;erf-zero:1&quot;,&quot;erf-zero:2&quot; -NumPrompts 128
 .\run_experiment.ps1 -RunDir outputs\run-bs8-seed42-YYYYMMDD-HHMMSS -EvalOnly</code></pre>
-<p>Re-running with an existing <code>-RunDir</code> trains only the
-missing variants and reuses cached generations. The individual scripts
-can be run directly; see <code>--help</code> on each, for example:</p>
+<p><code>-LearningRate</code> and <code>-Epochs</code> set the
+optimisation budget (for example
+<code>-LearningRate 0.0001 -Epochs 2</code>); the run directory name
+records both. Re-running with an existing <code>-RunDir</code> trains
+only the missing variants and reuses cached generations. The individual
+scripts can be run directly; see <code>--help</code> on each, for
+example:</p>
 <pre class="powershell"><code>.\.venv\Scripts\python.exe train.py --margin adaptive --gamma-max 2 --output outputs\custom\erf-zero-g2</code></pre>
 <p>Custom data is UTF-8 JSONL with one pair per line:
 <code>{&quot;prompt&quot;: &quot;...&quot;, &quot;chosen&quot;: &quot;...&quot;, &quot;rejected&quot;: &quot;...&quot;}</code>. A

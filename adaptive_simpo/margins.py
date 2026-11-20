@@ -2,7 +2,7 @@
 
 All quantities are in beta-scaled reward units:
 
-    r_i = beta * (mean_logp(y+|x) - mean_logp(y-|x)),   L_i = softplus(gamma_i - r_i).
+    r_i = beta * (mean_logp(y_w|x) - mean_logp(y_l|x)),   L_i = softplus(gamma_i - r_i).
 
 r_i > 0 means the pair is ranked correctly. Margins are computed from the
 detached reward gaps of the current batch, so dL_i/dr_i = -sigmoid(gamma_i - r_i)

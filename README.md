@@ -6,7 +6,7 @@ AdaptiveSimPO tests whether SimPO generates better answers when each preference 
 
 ### SimPO reward gap and loss
 
-For prompt $x_i$, chosen answer $y_i^+$ and rejected answer $y_i^-$, SimPO uses the length-normalised log-likelihood of the policy $\pi_\theta$ as an implicit reward:
+For prompt $x_i$, winning (chosen) answer $y_i^w$ and losing (rejected) answer $y_i^l$, SimPO uses the length-normalised log-likelihood of the policy $\pi_\theta$ as an implicit reward:
 
 $$
 \frac{\beta}{|y|}\log\pi_\theta(y\mid x)=\frac{\beta}{|y|}\sum_{k=1}^{|y|}\log\pi_\theta(y_k\mid x,y_{<k}),
@@ -15,7 +15,7 @@ $$
 where $|y|$ is the number of answer tokens. The reward gap of pair $i$ is
 
 $$
-r_i=\frac{\beta}{|y_i^+|}\log\pi_\theta(y_i^+\mid x_i)-\frac{\beta}{|y_i^-|}\log\pi_\theta(y_i^-\mid x_i).
+r_i=\frac{\beta}{|y_i^w|}\log\pi_\theta(y_i^w\mid x_i)-\frac{\beta}{|y_i^l|}\log\pi_\theta(y_i^l\mid x_i).
 $$
 
 $r_i>0$ means the pair is ranked correctly and $r_i<0$ means it is misranked. With a target margin $\gamma_i$, the per-pair SimPO loss is
@@ -43,6 +43,19 @@ At the same $r_i$, a larger $\gamma_i$ puts more gradient weight on raising that
 | `erf-zero-g<γ_max>` | $\gamma_i=\gamma_{\max}\operatorname{erf}\!\left(\dfrac{(-r_i)_+}{\sqrt2\,s_B}\right)$ | `--margin adaptive --gamma-max γ_max` |
 
 Here $(a)_+=\max(a,0)$, $\operatorname{erf}(z)=\frac{2}{\sqrt\pi}\int_0^z e^{-t^2}\,dt$, and $s_B$ is the standard deviation of the reward gaps in the current batch. The divisor is $B$ by default; `--std-correction 1` uses $B-1$, and `--eps` replaces a zero std. Only misranked pairs get a positive margin. The margin rises with the size of the error and never exceeds $\gamma_{\max}$.
+
+### Advantage: no per-setting γ search
+
+Fixed-margin SimPO is sensitive to γ. In the SimPO paper, win rate improves as the target margin grows but degrades once it becomes too large (Section 4.3). The best value also differs a lot between settings. The authors grid-search γ ∈ {0.3, 0.5, 1.0, 1.2, 1.4, 1.6} jointly with β and the learning rate, and end up with γ = 1.6, 0.3, 1.0 and 1.4 for Mistral-Base, Mistral-Instruct, Llama-3-Base and Llama-3-Instruct (Table 8). Each candidate is a full training run, and choosing among them needs held-out data.
+
+AdaptiveSimPO removes this search:
+
+- **The margin is set from the data during training.** Each pair's margin comes from the current batch's own reward gaps. A pair the model already ranks correctly gets no margin, and a misranked pair gets more the further it falls below zero, measured in batch standard deviations. As training progresses and the reward gaps change, the margins follow automatically, with no schedule.
+- **Scale-free difficulty.** The difficulty $(-r_i)_+/s_B$ is unchanged if every reward gap is rescaled, for example by a different β, a different model or a different stage of training. So the fraction of $\gamma_{\max}$ a pair receives does not have to be re-tuned when these change.
+- **An interpretable cap instead of a tuned target.** $\gamma_{\max}$ is a hardness percentile scale with a fixed meaning: a pair one batch standard deviation below zero gets $0.683\,\gamma_{\max}$. Under the normal model it also sets the expected margin (see below). This project keeps $\gamma_{\max}=2$ in every run and never tunes it. The fixed baseline, by contrast, is chosen from five trained candidates on development pairs.
+- **Lower cost.** One adaptive run replaces the five fixed-γ runs plus the selection step. With the SimPO paper's search grid, it would replace six γ candidates for each (β, lr) combination.
+
+$\gamma_{\max}$ is still a hyperparameter. The claim is that a default value works without per-setting search, and the experiments below test this against a fixed γ tuned on held-out data.
 
 ### Why erf: a normal model of the reward gaps
 

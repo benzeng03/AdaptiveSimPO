@@ -19,7 +19,7 @@
 
 ## 3. 方法（代码中的统一记号）
 
-奖励差 `r_i = β[ℓ̄(y⁺|x) − ℓ̄(y⁻|x)]`，r>0 表示排对。损失 `L_i = softplus(γ_i − r_i)`，γ_i 计算后 stop-grad，因此 `∂L_i/∂r_i = −sigmoid(γ_i − r_i)`。γ=0 的样本仍参与训练。
+奖励差 `r_i = β/|y^w|·log π_θ(y^w|x) − β/|y^l|·log π_θ(y^l|x)`（记号与 SimPO 论文一致：y^w 为胜出回答，y^l 为落败回答），r>0 表示排对。损失 `L_i = softplus(γ_i − r_i)`，γ_i 计算后 stop-grad，因此 `∂L_i/∂r_i = −sigmoid(γ_i − r_i)`。γ=0 的样本仍参与训练。
 
 | 变体名 | 公式 | CLI |
 |---|---|---|
@@ -83,6 +83,7 @@
 ### 数据来源（2026-11-20 核实）
 - SimPO 的 Base 设置用 `HuggingFaceH4/ultrafeedback_binarized`：`train_prefs` 用于训练，`test_prefs` 用于评估（官方配置 `dataset_splits: [train_prefs, test_prefs]`）。Instruct 设置用 on-policy 数据 `princeton-nlp/mistral-instruct-ultrafeedback`、`princeton-nlp/llama3-ultrafeedback`（由 PairRM 标注）；v0.2 用 `princeton-nlp/llama3-ultrafeedback-armorm`。
 - 官方两个分片（61,135 / 2,000 对）已从 `../SemanticAMaPO` 复制到 `data/ultrafeedback_binarized/`（不入库，train 有 226 MB）。
+- **训练并没有用全量数据**：目前所有实验只用 256 对的子集（约占 `train_prefs` 的 0.4%）。要用全量的 61,135 对，需要写一个把 parquet 转成 JSONL 的脚本。按现在的速度（约 1 秒/步，bs8），1 个 epoch 约 7,600 步，大约 2 小时/变体。
 - 已核实：`data/uf_original_train.jsonl` 的 256 对和 `uf_original_test.jsonl` 的 64 对，都是对应官方分片的精确子集（prompt 去掉了首尾空白）。Instruct 用的 on-policy 数据集本地没有，下载需要用户同意。
 
 ## 7. 状态 / 待办
@@ -99,4 +100,4 @@
 - 代码注释和 CLI 用英文；本文件和面向用户的总结用中文。
 - `outputs/` 不入库（见 `.gitignore`）。实验结论要摘要写进本文件。
 - 修改 margin 公式时，必须同时更新 `tests/test_margins.py`、第 3 节的表格和 README 的 Method 一节。
-- README.md 保持全英文，不提前序项目 RobustSimPO，不提 discussion.txt，不讨论 tanh 和归一化方式的选择（2026-11-20 用户要求）。奖励写成 β/|y|·log π_θ(y|x)，softplus 和 sigmoid 都写出表达式。
+- README.md 保持全英文，不提前序项目 RobustSimPO，不提 discussion.txt，不讨论 tanh 和归一化方式的选择（2026-11-20 用户要求）。奖励写成 β/|y|·log π_θ(y|x)，softplus 和 sigmoid 都写出表达式。记号用 y^w / y^l（与 SimPO 论文一致）。README 有一节 “Advantage: no per-setting γ search”：引用 SimPO 的 Table 8（四个设置的 γ 分别为 1.6、0.3、1.0、1.4，网格为 {0.3, 0.5, 1.0, 1.2, 1.4, 1.6}）和 §4.3（margin 过大时性能下降）；同时说明 γ_max 仍是超参数，只是固定为 2、不调。
