@@ -151,6 +151,41 @@ Mean answer length was 268 tokens for fixed-g0 and 276 for erf-zero-g2. No answe
 - **Training barely moved the policy.** On every development pair, each trained adapter ranks the chosen and rejected answers exactly as the untrained base model does. Every trained adapter also has a slightly higher dev log-loss than the base model. The choice of fixed γ therefore rests on log-loss differences of about 0.004, and with 32 LoRA updates at lr 5e-5 the comparison has little power.
 - **Normal assumption check.** Averaged over the 32 steps, the observed fraction of nonzero margins is within 2 points of the normal prediction (step-level SD 10 points). The mean margin is 0.08 lower than predicted (0.302 vs 0.383). The batch std averages 2.34 and some batches contain large outliers (std up to about 11). This is consistent with heavy tails inflating $s_B$ and shrinking the standardised errors, but this run does not test that explanation.
 
+### Run 2: lr 1e-4, 2 epochs (64 updates)
+
+Run `outputs/run-bs8-lr0.0001-ep2-seed42-20261120-000613` (2026-11-20; full table in its `results.md`). All other settings match Run 1.
+
+**Development pairs (baseline selection).**
+
+| Variant | Train mean γ | Normal-ref mean γ | Train active | Normal-ref active | Dev accuracy | Dev log-loss |
+|---|---:|---:|---:|---:|---:|---:|
+| base (untrained) | — | — | — | — | 33/64 | 0.7161 |
+| fixed-g0 | 0 | 0 | 0% | 0% | 36/64 | 0.6958 |
+| fixed-g0.25 | 0.25 | 0.25 | 100% | 100% | 36/64 | 0.6974 |
+| fixed-g0.5 | 0.5 | 0.5 | 100% | 100% | 36/64 | **0.6952** |
+| fixed-g0.75 | 0.75 | 0.75 | 100% | 100% | 36/64 | 0.6998 |
+| fixed-g1 | 1 | 1 | 100% | 100% | 36/64 | 0.6990 |
+| erf-zero-g2 | 0.283 | 0.346 | 37.5% | 36.6% | **37/64** | 0.6964 |
+
+All fixed margins again tie on accuracy, and the log-loss tie-break selects `fixed-g0.5`.
+
+**Generation (PairRM, 64 AlpacaEval prompts).**
+
+| Comparison | Wins / ties / losses | Win rate (95% CI) |
+|---|---:|---:|
+| erf-zero-g2 vs fixed-g0.5 | 24 / 13 / 27 | 47.66% (36.72%–58.59%) |
+| fixed-g0.5 vs GPT-4 reference | 2 / 1 / 61 | 3.91% |
+| erf-zero-g2 vs GPT-4 reference | 2 / 0 / 62 | 3.12% |
+
+Mean answer length was 279 tokens for fixed-g0.5 and 276 for erf-zero-g2. No answer hit the 4096-token limit, and 6 of the 64 answer pairs were identical.
+
+**Reading the results.**
+
+- **Training now moves the policy.** Every trained adapter beats the base model on the development pairs (36–37/64 vs 33/64 correct, log-loss about 0.696 vs 0.716). erf-zero-g2 flips the ranking of 4 development pairs relative to the base model.
+- **Adaptive matches the tuned fixed margin on preference data.** erf-zero-g2 used the default $\gamma_{\max}=2$ with no search. Its dev accuracy is the highest (one more pair than any fixed γ), and its log-loss lies within the range of the five fixed candidates. A one-pair difference on 64 pairs is not significant.
+- **No detectable difference in generation.** The head-to-head interval again contains 50%. Both policies stay far behind the GPT-4 reference, as expected for a 0.6B model trained on 256 pairs.
+- **Normal assumption check.** Over the 64 steps, the observed fraction of nonzero margins is again close to the normal prediction (37.5% vs 36.6%, step-level SD 10 points). The mean margin is again lower than predicted (0.283 vs 0.346). From epoch 1 to epoch 2 the misranked fraction falls from 41% to 34% and the mean batch gap rises from 0.45 to 0.80. So the adaptive margin shrinks automatically, from 0.30 to 0.26, as the model improves. The batch std falls from 2.23 to 1.57, and the largest batch std from 10.3 to 5.5.
+
 ## Repository layout
 
 | Path | Contents |

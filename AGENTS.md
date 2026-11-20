@@ -78,7 +78,13 @@
   - 生成（PairRM，64 个提示）：erf-zero-g2 vs fixed-g0 为 23 胜 / 15 平 / 26 负，WR 47.66%（CI 36.72–58.59%），**没有显著差异**。两者对 GPT-4 参考的 WR 都是 3.91%；平均长度 276 / 268 token；没有回答被 4096 上限截断；64 对回答中有 10 对完全相同。
   - **关键诊断**：每个 adapter 在 64 个 dev 对上的排序方向都和 base 模型完全一致。32 步 LoRA（lr 5e-5）几乎没有改变策略，所以这次比较的统计功效很低，固定 γ 的选择只取决于约 0.004 的 logloss 噪声。
   - 正态假设检验（erf-zero-g2，32 步）：实际激活比例比正态参照平均高 2.0 个百分点（逐步 SD 10.4）；实际平均 γ 比参照平均低 0.081（0.302 vs 0.383）。batch std 平均为 2.34，偶尔出现 std≈11 的离群 batch，这与重尾分布抬高 s_B、压低 u 的解释一致（未检验）。
-- **2026-11-20 第二次运行（进行中）**：lr 1e-4，2 epoch（64 步），其余设置不变。目录 `outputs/run-bs8-lr0.0001-ep2-seed42-20261120-000613`，日志 `outputs/experiment-lr1e-4-ep2-20261120-000612.log`。结果待补。
+- **2026-11-20 第二次运行** `outputs/run-bs8-lr0.0001-ep2-seed42-20261120-000613`（lr 1e-4，2 epoch，64 步；日志 `outputs/experiment-lr1e-4-ep2-20261120-000612.log`）：
+  - **这次训练生效了**：所有 adapter 在 dev 上都好于 base（36–37/64 vs 33/64；logloss ≈0.696 vs 0.716）；erf-zero-g2 相对 base 改变了 4 个 dev 对的排序方向。
+  - dev：5 个固定 γ 准确率都是 36/64，按 logloss 选中 `fixed-g0.5`（0.6952）；erf-zero-g2 为 37/64（最高，但只多 1 对，不显著），logloss 0.6964，落在固定 γ 的范围内。
+  - 生成：erf-zero-g2 vs fixed-g0.5 为 24 胜 / 13 平 / 27 负，WR 47.66%（CI 36.72–58.59%），**没有显著差异**。对 GPT-4 参考的 WR 为 3.12% / 3.91%；平均长度 276 / 279 token；没有回答被截断；64 对回答中有 6 对完全相同。
+  - 正态检验：激活比例实际 37.5%，参照 36.6%（逐步 SD 10）；平均 γ 实际 0.283，参照 0.346，仍然偏低。
+  - 训练过程：从第 1 个 epoch 到第 2 个 epoch，排错比例从 41% 降到 34%，batch 平均 r 从 0.45 升到 0.80，自适应 margin 随之自动从 0.30 降到 0.26；batch std 从 2.23 降到 1.57（最大值从 10.3 降到 5.5）。
+  - 结论：不调参的 erf-zero（γ_max=2）在 dev 偏好数据上与调过参的固定 γ 打平（略好但不显著），生成胜率也打平。
 
 ### 数据来源（2026-11-20 核实）
 - SimPO 的 Base 设置用 `HuggingFaceH4/ultrafeedback_binarized`：`train_prefs` 用于训练，`test_prefs` 用于评估（官方配置 `dataset_splits: [train_prefs, test_prefs]`）。Instruct 设置用 on-policy 数据 `princeton-nlp/mistral-instruct-ultrafeedback`、`princeton-nlp/llama3-ultrafeedback`（由 PairRM 标注）；v0.2 用 `princeton-nlp/llama3-ultrafeedback-armorm`。
@@ -89,7 +95,8 @@
 ## 7. 状态 / 待办
 
 - [x] 第一次正式结果已写回第 6 节和 README（2026-11-19）。
-- [ ] **优先**：加大训练强度，让策略真正发生变化（更高 lr、多个 epoch、更多数据），再比较 margin 规则。可以用“dev 排序是否与 base 不同、logloss 是否下降”作为训练是否生效的检查。
+- [x] 加大训练强度（lr 1e-4，2 epoch）后训练已生效（2026-11-20）。
+- [ ] 要得到有统计意义的结论：用更多训练数据（全量 `train_prefs` 每个变体约 4.5 小时；也可以先用几千对）、更多 dev 对和生成提示，或者多跑几个种子。
 - [ ] 64 个提示的 CI 宽约 ±11 个百分点：考虑增加提示数（`-NumPrompts`）或多跑几个种子（`-Seed`）。
 - [ ] 检查实际激活比例和平均 γ 与正态参照的偏差（`metrics.jsonl`）。
 - [ ] 可选：扫描 γ_max（例如 1、2、4），或按梯度权重上限选 γ_max=4·arctanh(δ)。

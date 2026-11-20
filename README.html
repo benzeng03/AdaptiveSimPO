@@ -363,9 +363,10 @@ optimisation budget. The baseline is a tuned fixed-margin SimPO.</p>
 <h2>Method</h2>
 <div id="simpo-reward-gap-and-loss" class="section level3">
 <h3>SimPO reward gap and loss</h3>
-<p>For prompt <span class="math inline">\(x_i\)</span>, chosen answer
-<span class="math inline">\(y_i^+\)</span> and rejected answer <span class="math inline">\(y_i^-\)</span>, SimPO uses the length-normalised
-log-likelihood of the policy <span class="math inline">\(\pi_\theta\)</span> as an implicit reward:</p>
+<p>For prompt <span class="math inline">\(x_i\)</span>, winning (chosen)
+answer <span class="math inline">\(y_i^w\)</span> and losing (rejected)
+answer <span class="math inline">\(y_i^l\)</span>, SimPO uses the
+length-normalised log-likelihood of the policy <span class="math inline">\(\pi_\theta\)</span> as an implicit reward:</p>
 <p><span class="math display">\[
 \frac{\beta}{|y|}\log\pi_\theta(y\mid
 x)=\frac{\beta}{|y|}\sum_{k=1}^{|y|}\log\pi_\theta(y_k\mid x,y_{&lt;k}),
@@ -373,8 +374,8 @@ x)=\frac{\beta}{|y|}\sum_{k=1}^{|y|}\log\pi_\theta(y_k\mid x,y_{&lt;k}),
 <p>where <span class="math inline">\(|y|\)</span> is the number of
 answer tokens. The reward gap of pair <span class="math inline">\(i\)</span> is</p>
 <p><span class="math display">\[
-r_i=\frac{\beta}{|y_i^+|}\log\pi_\theta(y_i^+\mid
-x_i)-\frac{\beta}{|y_i^-|}\log\pi_\theta(y_i^-\mid x_i).
+r_i=\frac{\beta}{|y_i^w|}\log\pi_\theta(y_i^w\mid
+x_i)-\frac{\beta}{|y_i^l|}\log\pi_\theta(y_i^l\mid x_i).
 \]</span></p>
 <p><span class="math inline">\(r_i&gt;0\)</span> means the pair is
 ranked correctly and <span class="math inline">\(r_i&lt;0\)</span> means
@@ -432,6 +433,46 @@ divisor is <span class="math inline">\(B\)</span> by default;
 <code>--std-correction 1</code> uses <span class="math inline">\(B-1\)</span>, and <code>--eps</code> replaces a
 zero std. Only misranked pairs get a positive margin. The margin rises
 with the size of the error and never exceeds <span class="math inline">\(\gamma_{\max}\)</span>.</p>
+</div>
+<div id="advantage-no-per-setting-γ-search" class="section level3">
+<h3>Advantage: no per-setting γ search</h3>
+<p>Fixed-margin SimPO is sensitive to γ. In the SimPO paper, win rate
+improves as the target margin grows but degrades once it becomes too
+large (Section 4.3). The best value also differs a lot between settings.
+The authors grid-search γ ∈ {0.3, 0.5, 1.0, 1.2, 1.4, 1.6} jointly with
+β and the learning rate, and end up with γ = 1.6, 0.3, 1.0 and 1.4 for
+Mistral-Base, Mistral-Instruct, Llama-3-Base and Llama-3-Instruct (Table
+8). Each candidate is a full training run, and choosing among them needs
+held-out data.</p>
+<p>AdaptiveSimPO removes this search:</p>
+<ul>
+<li><strong>The margin is set from the data during training.</strong>
+Each pair’s margin comes from the current batch’s own reward gaps. A
+pair the model already ranks correctly gets no margin, and a misranked
+pair gets more the further it falls below zero, measured in batch
+standard deviations. As training progresses and the reward gaps change,
+the margins follow automatically, with no schedule.</li>
+<li><strong>Scale-free difficulty.</strong> The difficulty <span class="math inline">\((-r_i)_+/s_B\)</span> is unchanged if every reward
+gap is rescaled, for example by a different β, a different model or a
+different stage of training. So the fraction of <span class="math inline">\(\gamma_{\max}\)</span> a pair receives does not
+have to be re-tuned when these change.</li>
+<li><strong>An interpretable cap instead of a tuned target.</strong>
+<span class="math inline">\(\gamma_{\max}\)</span> is a hardness
+percentile scale with a fixed meaning: a pair one batch standard
+deviation below zero gets <span class="math inline">\(0.683\,\gamma_{\max}\)</span>. Under the normal
+model it also sets the expected margin (see below). This project keeps
+<span class="math inline">\(\gamma_{\max}=2\)</span> in every run and
+never tunes it. The fixed baseline, by contrast, is chosen from five
+trained candidates on development pairs.</li>
+<li><strong>Lower cost.</strong> One adaptive run replaces the five
+fixed-γ runs plus the selection step. With the SimPO paper’s search
+grid, it would replace six γ candidates for each (β, lr)
+combination.</li>
+</ul>
+<p><span class="math inline">\(\gamma_{\max}\)</span> is still a
+hyperparameter. The claim is that a default value works without
+per-setting search, and the experiments below test this against a fixed
+γ tuned on held-out data.</p>
 </div>
 <div id="why-erf-a-normal-model-of-the-reward-gaps" class="section level3">
 <h3>Why erf: a normal model of the reward gaps</h3>
