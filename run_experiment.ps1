@@ -16,7 +16,7 @@ Re-running with an existing -RunDir trains only missing variants and reuses cach
 param(
     [string[]]$Variants = @("fixed:0", "fixed:0.25", "fixed:0.5", "fixed:0.75", "fixed:1", "erf-zero:2"),
     [string]$RunDir,
-    [string]$Python = (Join-Path $PSScriptRoot ".venv\Scripts\python.exe"),
+    [string]$Python,
     [int]$BatchSize = 8,
     [int]$Seed = 42,
     [double]$LearningRate = 0.00005,
@@ -32,6 +32,14 @@ $inv = [cultureinfo]::InvariantCulture
 
 function Assert-Exit { if ($LASTEXITCODE -ne 0) { throw "Command failed (exit $LASTEXITCODE)." } }
 
+# Run Python and fail only on a nonzero exit code. Stderr (warnings, progress bars) is
+# forwarded as plain text so that PowerShell 5.1 never turns it into a terminating error.
+function Invoke-Python {
+    $ErrorActionPreference = "Continue"
+    & $Python @args 2>&1 | ForEach-Object { Write-Host "$_" }
+    Assert-Exit
+}
+
 function Convert-Variant([string]$Spec) {
     $kind, $value = $Spec.Split(":", 2)
     if ($null -eq $value) { throw "Variant '$Spec' needs a value, e.g. fixed:0.5" }
@@ -41,6 +49,8 @@ function Convert-Variant([string]$Spec) {
     throw "Unknown variant '$Spec' (use fixed:<gamma> or erf-zero:<gamma_max>)"
 }
 
+# Resolved here because $PSScriptRoot is empty in param defaults under `powershell -File` (PS 5.1).
+if (!$Python) { $Python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe" }
 if (!(Test-Path -LiteralPath $Python -PathType Leaf)) { throw "Missing Python interpreter: $Python (pass -Python)" }
 if (!$RunDir) {
     if ($EvalOnly) { throw "-EvalOnly needs -RunDir" }
@@ -56,8 +66,7 @@ Push-Location -LiteralPath $PSScriptRoot
 try {
     if (!$EvalOnly) {
         if (!$PSCmdlet.ShouldProcess($RunDir, "Train $($plan.Count) adapters")) { return }
-        & $Python -c "import torch; assert torch.cuda.is_available(); print(torch.__version__, torch.cuda.get_device_name(0))"
-        Assert-Exit
+        Invoke-Python -c "import torch; assert torch.cuda.is_available(); print(torch.__version__, torch.cuda.get_device_name(0))"
         New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
         $common = @("--batch-size", "$BatchSize", "--seed", "$Seed", "--lr", $LearningRate.ToString("R", $inv),
                     "--beta", $Beta.ToString("R", $inv), "--epochs", "1", "--max-length", "384", "--max-prompt", "192")
@@ -66,13 +75,11 @@ try {
             if (Test-Path -LiteralPath (Join-Path $out "margin_stats.json")) { Write-Host "Skip trained $($item.Name)"; continue }
             if (Test-Path -LiteralPath $out) { Remove-Item -Recurse -Force -LiteralPath $out }
             Write-Host "=== Training $($item.Name)"
-            & $Python -u train.py @common @($item.Args) --output $out
-            Assert-Exit
+            Invoke-Python -u train.py @common @($item.Args) --output $out
         }
     }
     if (!$EvalOnly -or !(Test-Path -LiteralPath (Join-Path $RunDir "selection.json"))) {
-        & $Python -u score_pairs.py $RunDir --adapters @names
-        Assert-Exit
+        Invoke-Python -u score_pairs.py $RunDir --adapters @names
     }
     if ($SkipEval) { return }
 
@@ -91,12 +98,9 @@ try {
     if (!$PSCmdlet.ShouldProcess($gen, "Generate and judge with baseline $baseline")) { return }
     Write-Host "Baseline (dev-selected fixed): $baseline"
     $baseArg = @(if ($IncludeBase) { "--base" })
-    & $Python -u generate.py @adapterArgs @baseArg --output $gen --num-prompts $NumPrompts --seed $Seed --max-new-tokens $MaxNewTokens
-    Assert-Exit
-    & $Python -u judge.py $gen --baseline $baseline
-    Assert-Exit
-    & $Python -u summarize.py $RunDir
-    Assert-Exit
+    Invoke-Python -u generate.py @adapterArgs @baseArg --output $gen --num-prompts $NumPrompts --seed $Seed --max-new-tokens $MaxNewTokens
+    Invoke-Python -u judge.py $gen --baseline $baseline
+    Invoke-Python -u summarize.py $RunDir
 } finally {
     Pop-Location
 }
