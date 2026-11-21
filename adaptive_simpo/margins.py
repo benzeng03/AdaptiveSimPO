@@ -1,20 +1,27 @@
-"""Per-pair SimPO target margins.
+"""Per-pair SimPO target margins: the fixed SimPO margin and the calibrated margin.
 
 All quantities are in beta-scaled reward units:
 
     r_i = beta * (mean_logp(y_w|x) - mean_logp(y_l|x)),   L_i = softplus(gamma_i - r_i).
 
-r_i > 0 means the pair is ranked correctly. Margins are computed from the
-detached reward gaps of the current batch, so dL_i/dr_i = -sigmoid(gamma_i - r_i)
-and no gradient flows through gamma_i.
+r_i > 0 means the pair is ranked correctly. Margins are computed from detached reward gaps,
+so dL_i/dr_i = -sigmoid(gamma_i - r_i) and no gradient flows through gamma_i: a margin acts
+only as a per-pair gradient weight w_i = sigmoid(gamma_i - r_i).
 
 Rules
 -----
-fixed      gamma_i = gamma                                          (SimPO)
-adaptive   gamma_i = gamma_max * erf( (-r_i)_+ / (sqrt(2) * s_B) )   (zero-threshold erf)
+fixed       gamma_i = gamma                       (SimPO)
+calibrated  gamma_i = (1 - k) * r_i               (README, "Calibrated margins")
 
-s_B is the standard deviation of the reward gaps in the current batch. Only
-misranked pairs (r_i < 0) receive a positive margin; gamma_i is bounded by gamma_max.
+The calibrated margin maximises the calibrated likelihood sum_i log sigmoid(k r_i) with k held
+fixed while the policy is updated. k is the slope of the logistic calibration curve
+P(r > 0 | |r|) = sigmoid(k |r|). For normal gaps N(mu, sigma^2) this curve is exact with
+k = 2 mu / sigma^2, which is estimated from the mean and (population) variance of the current
+batch's gaps, with lower bound K_MIN (used when the batch mean is nonpositive or tiny).
+With gamma_i = (1 - k) r_i the weight is
+sigmoid(gamma_i - r_i) = sigmoid(-k r_i), the calibrated residual, and the forward loss is
+-log sigmoid(k r_i). k = 1 means no temperature correction and the margin vanishes; k < 1
+(over-confident gaps) gives margins that grow with the gap and negative margins for misranked pairs.
 """
 from __future__ import annotations
 
@@ -24,65 +31,66 @@ from dataclasses import asdict, dataclass
 import torch
 from torch.nn import functional as F
 
-KINDS = ("fixed", "adaptive")
+KINDS = ("fixed", "calibrated")
+K_MIN = 0.01                   # lower bound of the calibration slope
 
 
 @dataclass(frozen=True)
 class MarginConfig:
     kind: str = "fixed"
-    gamma: float = 0.5          # fixed margin
-    gamma_max: float = 2.0      # adaptive upper bound
-    std_correction: int = 0     # 0: divisor B (population), 1: divisor B-1
-    eps: float = 1e-6           # divisor used when the batch std is zero
+    gamma: float = 0.5           # fixed margin
 
     def __post_init__(self):
         if self.kind not in KINDS:
             raise ValueError(f"kind must be one of {KINDS}")
-        if not all(math.isfinite(v) for v in (self.gamma, self.gamma_max, self.eps)):
-            raise ValueError("margin parameters must be finite")
-        if self.gamma < 0 or self.gamma_max < 0 or self.eps <= 0:
-            raise ValueError("require gamma, gamma_max >= 0 and eps > 0")
-        if self.std_correction not in (0, 1):
-            raise ValueError("std_correction must be 0 or 1")
+        if not math.isfinite(self.gamma) or self.gamma < 0:
+            raise ValueError("gamma must be finite and >= 0")
 
     @property
     def name(self) -> str:
-        if self.kind == "fixed":
-            return f"fixed-g{self.gamma:g}"
-        return f"erf-zero-g{self.gamma_max:g}"
+        return f"fixed-g{self.gamma:g}" if self.kind == "fixed" else "calibrated"
 
     def to_dict(self):
         return asdict(self)
 
 
-def _adaptive(r: torch.Tensor, scale, gamma_max: float) -> torch.Tensor:
-    return gamma_max * torch.erf((-r).clamp_min(0) / (math.sqrt(2.0) * scale))
+def calibration_slope(r: torch.Tensor, lo: float = K_MIN) -> float:
+    """Normal-reference slope k = 2 mean / var of the gaps r (population variance), at least lo.
+    A nonpositive mean gives lo, and so does a degenerate batch with zero variance."""
+    r = r.detach().double().flatten()
+    var, mean = torch.var_mean(r, correction=0)
+    if mean.item() <= 0 or var.item() <= 0:
+        return lo
+    return max(2 * mean.item() / var.item(), lo)
 
 
 @torch.no_grad()
 def compute_margins(scores: torch.Tensor, cfg: MarginConfig):
-    """Return (gamma, stats) for a 1-D tensor of reward gaps r_i."""
+    """Return (gamma, stats) for a 1-D tensor of reward gaps r_i (one batch).
+
+    For the calibrated rule stats also report the slope ``calib_k`` fitted on this batch.
+    """
     r = scores.detach().double()
     if r.ndim != 1 or r.numel() == 0 or not torch.isfinite(r).all():
         raise ValueError("expected a finite, nonempty vector of reward gaps")
-    correction = cfg.std_correction if r.numel() > 1 else 0
-    std, mean = torch.std_mean(r, correction=correction)
-    scale = torch.where(std > 0, std, torch.full_like(std, cfg.eps))
+    std, mean = torch.std_mean(r, correction=0)
+    stats = dict(batch_mean=mean.item(), batch_std=std.item(), misranked=(r < 0).double().mean().item())
     if cfg.kind == "fixed":
         gamma = torch.full_like(r, cfg.gamma)
     else:
-        gamma = _adaptive(r, scale, cfg.gamma_max)
-    stats = dict(batch_mean=mean.item(), batch_std=std.item(),
-                 gamma_mean=gamma.mean().item(), active=(gamma > 0).double().mean().item(),
-                 misranked=(r < 0).double().mean().item())
+        k = calibration_slope(r)
+        gamma = (1 - k) * r
+        stats.update(calib_k=k)
+    stats.update(gamma_mean=gamma.mean().item(), active=(gamma > 0).double().mean().item())
     return gamma.to(scores.dtype if scores.is_floating_point() else torch.float32), stats
 
 
 def simpo_loss(chosen_logps, rejected_logps, beta, cfg: MarginConfig):
     """Mean SimPO loss with per-pair detached margins.
 
-    chosen_logps / rejected_logps are length-normalised (mean per-token) log
-    probabilities. Returns (loss, scores, gamma, stats).
+    chosen_logps / rejected_logps are length-normalised (mean per-token) log probabilities.
+    Returns (loss, scores, gamma, stats). stats also reports the gradient weights
+    w_i = sigmoid(gamma_i - r_i): their mean and the share of their sum that falls on misranked pairs.
     """
     if not math.isfinite(beta) or beta <= 0:
         raise ValueError("beta must be positive and finite")
@@ -90,21 +98,9 @@ def simpo_loss(chosen_logps, rejected_logps, beta, cfg: MarginConfig):
         raise ValueError("expected paired chosen/rejected log probabilities")
     scores = beta * (chosen_logps.float() - rejected_logps.float())
     gamma, stats = compute_margins(scores, cfg)
+    with torch.no_grad():
+        w = torch.sigmoid(gamma - scores.detach())
+        stats.update(weight_mean=w.mean().item(),
+                     weight_share_misranked=(w * (scores.detach() < 0)).sum().item() / w.sum().item())
     loss = F.softplus(gamma.detach() - scores).mean()
     return loss, scores.detach(), gamma.detach(), stats
-
-
-@torch.no_grad()
-def normal_reference(mu: float, sigma: float, cfg: MarginConfig, points: int = 20001):
-    """Active fraction and mean margin expected if R ~ N(mu, sigma^2) and the batch
-    statistics equal (mu, sigma). For the adaptive rule the active fraction is
-    P(R < 0) = Phi(-mu / sigma)."""
-    if sigma <= 0:
-        raise ValueError("sigma must be positive")
-    z = torch.linspace(-10, 10, points, dtype=torch.float64)
-    weights = torch.exp(-0.5 * z ** 2) / math.sqrt(2 * math.pi) * (z[1] - z[0])
-    if cfg.kind == "fixed":
-        g = torch.full_like(z, cfg.gamma)
-    else:
-        g = _adaptive(mu + sigma * z, sigma, cfg.gamma_max)
-    return dict(active=float((weights * (g > 0)).sum()), gamma_mean=float((weights * g).sum()))

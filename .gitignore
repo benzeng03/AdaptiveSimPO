@@ -1,9 +1,39 @@
+# Python
 __pycache__/
 *.pyc
 .venv/
+
+# Local, not versioned: experiment outputs, model weights, papers
 outputs/
-*.safetensors
-*.tmp
 models/
 papers/
+*.safetensors
+*.tmp
+
+# Data: rebuilt by prepare_data.py from the official UltraFeedback parquet files
 data/ultrafeedback_binarized/
+data/uf_train4096.jsonl
+data/uf_dev500.jsonl
+data/uf_test1486.jsonl
+# Arena-Hard v0.1 questions, downloaded from github.com/lm-sys/arena-hard-auto
+data/arena-hard-v0.1/
+
+# HTML renderings of the Markdown files (python render_docs.py)
+*.html
+
+# Figures: the generated page and the scripts that build it are local only
+figures/*
+!figures/png/
+research/*figure*
+
+# Local-only notes and tooling
+AGENTS.md
+render_docs.py
+
+# Editor and OS files
+.Rhistory
+.Rproj.user/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

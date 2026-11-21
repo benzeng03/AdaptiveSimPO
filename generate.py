@@ -1,4 +1,5 @@
-"""Sample answers from several adapters on the same seeded AlpacaEval prompts.
+"""Sample answers from several adapters on the same seeded evaluation prompts (AlpacaEval by
+default; --eval-data data/arena-hard-v0.1/question.jsonl for Arena-Hard).
 
 Each policy answers the same prompts with the same per-group sampling seed, so
 policies differ only in their weights. Prompts that exactly match a training
@@ -6,7 +7,7 @@ prompt are excluded. Completed groups are cached as OUT/<group>-<name>.json and
 reused on rerun.
 
     python generate.py --output outputs/run/generations \
-        --adapter fixed-g0.5=outputs/run/fixed-g0.5 --adapter erf-zero-g2=outputs/run/erf-zero-g2 [--base]
+        --adapter fixed-g2=outputs/run/fixed-g2 --adapter calibrated=outputs/run/calibrated [--base]
 """
 import argparse
 import json
@@ -18,6 +19,18 @@ import torch
 from adaptive_simpo.modeling import adapter_key, load_policy, read_jsonl
 
 HERE = Path(__file__).resolve().parent
+
+
+def load_eval_data(path: Path):
+    """A JSON list (AlpacaEval) or JSONL file (Arena-Hard question.jsonl) of prompts.
+    The prompt is read from "instruction" or, failing that, "prompt"."""
+    text = path.read_text(encoding="utf-8")
+    rows = json.loads(text) if path.suffix == ".json" else [json.loads(l) for l in text.splitlines() if l.strip()]
+    for r in rows:
+        r.setdefault("instruction", r.get("prompt"))
+        if not isinstance(r["instruction"], str):
+            raise SystemExit(f"{path}: every row needs a string 'instruction' or 'prompt'")
+    return rows
 
 
 def eval_indices(data, train_rows, n, seed):
@@ -44,7 +57,7 @@ def main(argv=None):
     p.add_argument("--model", default=str(HERE / "models/Qwen3-0.6B"))
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--eval-data", type=Path, default=HERE / "data/alpaca_eval_gpt4_baseline.json")
-    p.add_argument("--train-data", type=Path, default=HERE / "data/uf_original_train.jsonl")
+    p.add_argument("--train-data", type=Path, default=HERE / "data/uf_train4096.jsonl")
     p.add_argument("--num-prompts", type=int, default=64)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--group", type=int, default=8)
@@ -59,7 +72,7 @@ def main(argv=None):
         p.error("give at least one --adapter or --base")
 
     from transformers import AutoTokenizer
-    data = json.loads(args.eval_data.read_text(encoding="utf-8"))
+    data = load_eval_data(args.eval_data)
     indices = eval_indices(data, read_jsonl(args.train_data), args.num_prompts, args.seed)
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "prompts.json").write_text(json.dumps(dict(

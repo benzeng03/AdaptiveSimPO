@@ -1,4 +1,4 @@
-"""CPU smoke test: train -> dev scoring -> generation with a tiny random Qwen3."""
+"""CPU smoke test: train -> dev/test scoring -> summary -> generation with a tiny random Qwen3."""
 import json
 import tempfile
 import unittest
@@ -17,6 +17,7 @@ class PipelineSmokeTest(unittest.TestCase):
 
         import generate
         import score_pairs
+        import summarize
         import train
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -37,28 +38,34 @@ class PipelineSmokeTest(unittest.TestCase):
                       "--max-length", "96", "--max-prompt", "48", "--lr", "1e-3"]
             run = tmp / "run"
             train.main(common + ["--margin", "fixed", "--gamma", "0.5", "--output", str(run / "fixed-g0.5")])
-            train.main(common + ["--margin", "adaptive", "--gamma-max", "2", "--output", str(run / "erf-zero-g2")])
+            train.main(common + ["--margin", "calibrated", "--output", str(run / "calibrated")])
             train.main(common + ["--margin", "fixed", "--gamma", "0.75", "--max-steps", "1",
                                  "--output", str(run / "fixed-g0.75")])
 
-            stats = json.loads((run / "erf-zero-g2" / "margin_stats.json").read_text())
+            stats = json.loads((run / "calibrated" / "margin_stats.json").read_text())
             self.assertEqual(stats["steps"], 2)
-            self.assertEqual(stats["variant"], "erf-zero-g2")
-            self.assertLessEqual(stats["gamma_mean"], 2.0)
-            self.assertIn("normal_ref_active", stats)
-            lines = (run / "erf-zero-g2" / "metrics.jsonl").read_text().splitlines()
+            self.assertEqual(stats["variant"], "calibrated")
+            self.assertIn("weight_share_misranked", stats)
+            self.assertIn("calib_k_mean", stats)
+            lines = (run / "calibrated" / "metrics.jsonl").read_text().splitlines()
             self.assertEqual(len(lines), 2)
+            self.assertIn("calib_k", json.loads(lines[1]))
+            self.assertNotIn("calib_k_mean", json.loads((run / "fixed-g0.5" / "margin_stats.json").read_text()))
 
             dev = tmp / "dev.jsonl"
             dev.write_text("\n".join(json.dumps(r) for r in data[:4]), encoding="utf-8")
             score_pairs.main([str(run), "--data", str(dev), "--batch-size", "2"])
             scores = json.loads((run / "dev_scores.json").read_text())
-            self.assertEqual([s["adapter"] for s in scores], ["base", "erf-zero-g2", "fixed-g0.5", "fixed-g0.75"])
+            self.assertEqual([s["adapter"] for s in scores], ["base", "calibrated", "fixed-g0.5", "fixed-g0.75"])
             self.assertIn(json.loads((run / "selection.json").read_text())["best_fixed"], ("fixed-g0.5", "fixed-g0.75"))
+            score_pairs.main([str(run), "--split", "test", "--data", str(dev), "--batch-size", "2"])
+            self.assertTrue((run / "test_scores.json").exists())
+            summarize.main([str(run)])
+            self.assertIn("McNemar", (run / "results.md").read_text(encoding="utf-8"))
 
             gen = run / "gen"
             args = ["--model", str(model_dir), "--output", str(gen), "--device", "cpu", "--base",
-                    "--adapter", f"fixed-g0.5={run / 'fixed-g0.5'}", "--adapter", f"erf-zero-g2={run / 'erf-zero-g2'}",
+                    "--adapter", f"fixed-g0.5={run / 'fixed-g0.5'}", "--adapter", f"calibrated={run / 'calibrated'}",
                     "--num-prompts", "3", "--group", "2", "--max-new-tokens", "4"]
             generate.main(args)
             files = sorted(p.name for p in gen.glob("*-*.json"))

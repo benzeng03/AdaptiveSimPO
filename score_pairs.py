@@ -1,10 +1,11 @@
 """Score trained adapters on held-out preference pairs and select the fixed-margin baseline.
 
 For each adapter under RUN (and the untrained base model) this reports pairwise
-accuracy (r > 0), mean log-loss softplus(-r) and the mean reward gap r on the
-development pairs. The fixed-margin adapter with the highest accuracy is selected,
-ties broken by lower log-loss and then smaller gamma. Writes RUN/dev_scores.json,
-RUN/dev_scores.csv and RUN/selection.json.
+accuracy (r > 0), accuracy on pairs whose annotation scores are not tied, mean
+log-loss softplus(-r) and the mean reward gap r. Writes RUN/<split>_scores.json and
+RUN/<split>_scores.csv. With --split dev (the default) the fixed-margin adapter with
+the highest accuracy is selected, ties broken by lower log-loss and then smaller
+gamma, and written to RUN/selection.json. --split test only reports.
 """
 import argparse
 import csv
@@ -30,14 +31,18 @@ def select_fixed(results):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("run", type=Path)
-    p.add_argument("--data", type=Path, default=HERE / "data/uf_original_test.jsonl")
-    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--split", choices=("dev", "test"), default="dev")
+    p.add_argument("--data", type=Path, help="default: data/uf_dev500.jsonl or data/uf_test1486.jsonl")
+    p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--no-base", action="store_true", help="skip scoring the untrained base model")
     p.add_argument("--adapters", nargs="+", help="only score these adapter directory names")
     args = p.parse_args(argv)
+    if args.data is None:
+        args.data = HERE / ("data/uf_dev500.jsonl" if args.split == "dev" else "data/uf_test1486.jsonl")
     rows = read_jsonl(args.data)
     if not rows:
-        p.error("empty development dataset")
+        p.error(f"empty {args.split} dataset")
+    strict = torch.tensor([r.get("score_chosen", 1.0) != r.get("score_rejected", 0.0) for r in rows])
     dirs = sorted(d for d in args.run.iterdir() if d.is_dir() and is_adapter_dir(d)
                   and (not args.adapters or d.name in args.adapters))
     if args.adapters and len(dirs) != len(set(args.adapters)):
@@ -72,17 +77,21 @@ def main(argv=None):
                    gamma=cfg["gamma"] if name != "base" and cfg["margin"] == "fixed" else None,
                    pairs=len(rows), correct=int((gap > 0).sum()),
                    accuracy=(gap > 0).float().mean().item(),
+                   accuracy_untied=(gap[strict] > 0).float().mean().item() if strict.any() else None,
+                   untied_pairs=int(strict.sum()),
                    logloss=F.softplus(-gap).mean().item(), reward_gap=gap.mean().item(),
                    gaps=gap.tolist())
         results.append(res)
-        print(f"[dev] {name:24s} acc {res['correct']}/{len(rows)}  logloss {res['logloss']:.4f}  "
+        print(f"[{args.split}] {name:24s} acc {res['correct']}/{len(rows)}  logloss {res['logloss']:.4f}  "
               f"mean r {res['reward_gap']:+.4f}", flush=True)
-    (args.run / "dev_scores.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
-    with (args.run / "dev_scores.csv").open("w", newline="", encoding="utf-8") as f:
+    (args.run / f"{args.split}_scores.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+    with (args.run / f"{args.split}_scores.csv").open("w", newline="", encoding="utf-8") as f:
         fields = [k for k in results[0] if k != "gaps"]
         w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
         w.writerows(results)
+    if args.split != "dev":
+        return
     best = select_fixed(results)
     (args.run / "selection.json").write_text(json.dumps(dict(
         best_fixed=best, rule="max dev accuracy, then min dev logloss, then min gamma",
