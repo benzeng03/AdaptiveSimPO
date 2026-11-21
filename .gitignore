@@ -29,6 +29,7 @@ research/*figure*
 # Local-only notes and tooling
 AGENTS.md
 render_docs.py
+discussion.txt
 
 # Editor and OS files
 .Rhistory
