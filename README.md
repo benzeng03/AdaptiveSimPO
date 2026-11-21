@@ -45,7 +45,7 @@ Custom data is UTF-8 JSONL with one pair per line: `{"prompt": "...", "chosen": 
 For prompt $x_i$, winning (chosen) answer $y_i^w$ and losing (rejected) answer $y_i^l$, SimPO uses the length-normalised log-likelihood of the policy $\pi_\theta$ as an implicit reward:
 
 $$
-\frac{\beta}{|y|}\log\pi_\theta(y\mid x)=\frac{\beta}{|y|}\sum_{k=1}^{|y|}\log\pi_\theta(y_k\mid x,y_{<k}),
+\frac{\beta}{|y|}\log\pi_\theta(y\mid x)=\frac{\beta}{|y|}\sum_{k=1}^{|y|}\log\pi_\theta(y_k\mid x,y_{\lt k}),
 $$
 
 where $|y|$ is the number of answer tokens. The reward gap of pair $i$ is
@@ -57,8 +57,8 @@ $$
 $r_i>0$ means the pair is ranked correctly and $r_i<0$ means it is misranked. With a target margin $\gamma_i$, the per-pair SimPO loss is
 
 $$
-L_i=-\log\sigma(r_i-\gamma_i)=\operatorname{softplus}(\gamma_i-r_i),\qquad
-\sigma(a)=\frac{1}{1+e^{-a}},\quad \operatorname{softplus}(a)=\log\left(1+e^{a}\right),
+L_i=-\log\sigma(r_i-\gamma_i)=\mathrm{softplus}(\gamma_i-r_i),\qquad
+\sigma(a)=\frac{1}{1+e^{-a}},\quad \mathrm{softplus}(a)=\log\left(1+e^{a}\right),
 $$
 
 and the training objective is the batch mean of $L_i$. SimPO uses one constant $\gamma_i=\gamma$ for all pairs, tuned per setting.
@@ -116,7 +116,7 @@ $$
 
 and differ only by the common factor $\hat k$: the forward losses are equal, and because the margin is detached, back-propagation leaves the factor out. The SimPO step with the calibrated margin thus points along the gradient of the calibrated log-likelihood, with a raw size that differs by $1/\hat k$ at the same learning rate.
 
-This weight is the only way a detached margin acts on training. Conversely, every weight $w\in(0,1)$ is produced by the margin $\gamma_i=r_i+\operatorname{logit}w$, so a margin rule is a rule for sharing the gradient among pairs; since Adam normalises the overall scale of the update, mainly the relative weights matter (training logs the share of $\sum_iw_i$ on misranked pairs as `weight_share_misranked`). Three properties of the calibrated weight follow:
+This weight is the only way a detached margin acts on training. Conversely, every weight $w\in(0,1)$ is produced by the margin $\gamma_i=r_i+\mathrm{logit}\,w$, so a margin rule is a rule for sharing the gradient among pairs; since Adam normalises the overall scale of the update, mainly the relative weights matter (training logs the share of $\sum_iw_i$ on misranked pairs as `weight_share_misranked`). Three properties of the calibrated weight follow:
 
 - *It is the surprise of the observed outcome* under the calibrated model: a correctly ranked pair gets $1-\sigma(\hat k|r_i|)$ and a misranked pair gets $\sigma(\hat k|r_i|)$. The zero margin uses $\sigma(-r_i)$ instead, which treats $r_i$ itself as log-odds.
 - *It changes the temperature of the weights.* For a margin rule $\gamma=g(r)$, $\partial w/\partial r=(g'-1)\,w(1-w)$, so the logit of the weight has slope $g'-1$ in $r$. A fixed γ ($g'=0$) keeps the slope $-1$ and only shifts the sigmoid; the calibrated margin ($g'=1-\hat k$) has slope $-\hat k$, which for $0<\hat k<1$ flattens the weight profile.
@@ -214,7 +214,7 @@ All pairs come from [HuggingFaceH4/ultrafeedback_binarized](https://huggingface.
 | Optimisation | AdamW, constant lr 1e-4, β=2, batch 16 pairs, 1 epoch (256 updates), seed 42 |
 | Lengths | prompt ≤192 tokens (keeps the end), prompt + answer ≤384 tokens (keeps the start); EOS counts as an answer token |
 | Variants | fixed γ ∈ {0, 1, 2}; the calibrated margin $\gamma_i=(1-\hat k)\,r_i$ with $\hat k=2\bar r_B/s_B^2$ of the current batch, trained once |
-| Baseline selection | `data/uf_dev500.jsonl`: highest pairwise accuracy ($r>0$) among the fixed margins, ties broken by lower mean $\operatorname{softplus}(-r)$, then smaller γ |
+| Baseline selection | `data/uf_dev500.jsonl`: highest pairwise accuracy ($r>0$) among the fixed margins, ties broken by lower mean $\mathrm{softplus}(-r)$, then smaller γ |
 | Test pairs | `data/uf_test1486.jsonl`: accuracy, accuracy on untied pairs and log-loss; each variant is compared with the baseline on the same pairs, with 95% bootstrap intervals over pairs and an exact McNemar test |
 | Generation | 128 AlpacaEval prompts sampled with seed 42 (exact training-prompt matches excluded), Qwen chat template with thinking disabled, temperature 0.9, top-p 1, ≤4096 new tokens, 16 prompts per sampling group. Both policies use the same sampling seed per prompt group |
 | Judge | GPT-6.2-Sol (medium reasoning, through the Codex CLI; `research/llm_judge.py`), in both answer orders: a win needs both orders to agree, anything else is a tie. Win rate $=(W+0.5T)/N$ with a 95% prompt-bootstrap interval |
@@ -244,7 +244,7 @@ Generation on 128 AlpacaEval prompts (no answer unfinished), calibrated vs fixed
 |---|---:|---:|---:|---:|
 | calibrated vs fixed γ = 2 | 98 / 16 / 14 | 82.8% (76.6%–88.3%) | 83.1% (76.8%–89.1%) | 88.3% |
 
-The judge chose slot A 53.5% of the time. The length-controlled (LC) win rate follows AlpacaEval 2: a logistic model $\operatorname{logit}P(\text{win})=a+b\tanh(\Delta/\operatorname{sd}\Delta)$ of the per-prompt score (1, 0.5, 0) on the difference $\Delta$ in answer length (characters) is fitted, and the LC win rate is $\sigma(a)$, the win rate with the length term set to zero (`research/lc_winrate.py`; AlpacaEval's instruction-difficulty term needs many models and is left out, so the number is not comparable with the leaderboard). The fitted length coefficient is $b=-0.06$, and the LC win rate is essentially the raw one. The gap is not explained by length. Calibrated answers are longer on average (415 vs 314 tokens) and in 77% of prompts, but the win rate does not rise with the length difference:
+The judge chose slot A 53.5% of the time. The length-controlled (LC) win rate follows AlpacaEval 2: a logistic model $\mathrm{logit}\,P(\text{win})=a+b\tanh(\Delta/\mathrm{sd}\,\Delta)$ of the per-prompt score (1, 0.5, 0) on the difference $\Delta$ in answer length (characters) is fitted, and the LC win rate is $\sigma(a)$, the win rate with the length term set to zero (`research/lc_winrate.py`; AlpacaEval's instruction-difficulty term needs many models and is left out, so the number is not comparable with the leaderboard). The fitted length coefficient is $b=-0.06$, and the LC win rate is essentially the raw one. The gap is not explained by length. Calibrated answers are longer on average (415 vs 314 tokens) and in 77% of prompts, but the win rate does not rise with the length difference:
 
 | Calibrated answer vs baseline | Prompts | Win rate |
 |---|---:|---:|
