@@ -1,6 +1,6 @@
 # AdaptiveSimPO
 
-SimPO (Meng et al., 2024) trains a policy to rank preferred responses above rejected ones with a single fixed target reward margin γ. The best γ varies across models and datasets, so it is usually chosen by grid search, which costs one full training run per candidate value and requires held-out data for model selection. We propose a **calibrated margin** $\gamma_i=(1-\hat k)\,r_i$, obtained by reading the SimPO loss as the negative log-likelihood of a Bradley–Terry model whose log-odds are proportional to the reward gap, $\log\frac{p_i}{1-p_i}=k\,r_i$. Under a normal approximation to the reward gaps the slope has the closed form $k=2\mu/\sigma^2$, which we estimate from every batch. The margin therefore has no free magnitude to tune, and a single training run replaces both the γ grid and the selection step. On Qwen3-0.6B fine-tuned with LoRA on 4,096 UltraFeedback pairs, the untuned calibrated margin matches the best fixed margin from γ ∈ {0, 0.5, 1, 1.5, 2, 2.5}, chosen with hindsight on the 1,986 test pairs, in held-out preference accuracy (65.6% vs. 66.1%, exact McNemar p = 0.53) and reaches win rates of 82.3% on the full AlpacaEval set (804 prompts) and 88.0% on the full Arena-Hard v0.1 set (500 prompts) against it in pairwise generation comparisons judged by GPT-6.2-Sol (ties count as half; length-controlled 82.8% and 87.3%). Against the public answers of Gemma-2B-it, which both 0.6B policies lose to, the calibrated policy wins 26.7% (AlpacaEval) and 34.9% (Arena-Hard) of the prompts, against 13.3% and 12.6% for the fixed margin.
+SimPO (Meng et al., 2024) trains a policy to rank preferred responses above rejected ones with a single fixed target reward margin γ. The best γ varies across models and datasets, so it is usually chosen by grid search, which costs one full training run per candidate value and requires held-out data for model selection. We propose a **calibrated margin** $\gamma_i=(1-\hat k)r_i$, obtained by reading the SimPO loss as the negative log-likelihood of a Bradley–Terry model whose log-odds are proportional to the reward gap, $\log\frac{p_i}{1-p_i}=kr_i$. Under a normal approximation to the reward gaps the slope has the closed form $k=2\mu/\sigma^2$, which we estimate from every batch. The margin therefore has no free magnitude to tune, and a single training run replaces both the γ grid and the selection step. On Qwen3-0.6B fine-tuned with LoRA on 4,096 UltraFeedback pairs, the untuned calibrated margin matches the best fixed margin from γ ∈ {0, 0.5, 1, 1.5, 2, 2.5}, chosen with hindsight on the 1,986 test pairs, in held-out preference accuracy (65.6% vs. 66.1%, exact McNemar p = 0.53) and reaches win rates of 82.3% on the full AlpacaEval set (804 prompts) and 88.0% on the full Arena-Hard v0.1 set (500 prompts) against it in pairwise generation comparisons judged by GPT-6.2-Sol (ties count as half; length-controlled 82.8% and 87.3%). Against the public answers of Gemma-2B-it, which both 0.6B policies lose to, the calibrated policy wins 26.7% (AlpacaEval) and 34.9% (Arena-Hard) of the prompts, against 13.3% and 12.6% for the fixed margin.
 
 ## Setup
 
@@ -66,28 +66,28 @@ and the training objective is the batch mean of $L_i$. SimPO uses one constant $
 $\gamma_i$ is detached after it is computed, so
 
 $$
-\frac{\partial L_i}{\partial r_i}=-\sigma(\gamma_i-r_i)=-\frac{1}{1+e^{\,r_i-\gamma_i}}.
+\frac{\partial L_i}{\partial r_i}=-\sigma(\gamma_i-r_i)=-\frac{1}{1+e^{\thinspace r_i-\gamma_i}}.
 $$
 
 At the same $r_i$, a larger $\gamma_i$ puts more gradient weight on raising that pair's reward gap. A pair with $\gamma_i=0$ still trains.
 
 ### Calibrated margins: the SimPO loss as a negative log-likelihood
 
-The SimPO loss $-\log\sigma(r_i-\gamma_i)$ has the form of a negative log-likelihood, so minimising it maximises the likelihood of the observed labels under some Bradley–Terry model. With $\gamma_i=0$ that model takes the reward gap itself as the log-odds that $y_i^w$ is preferred. But $r$ is a score, not a calibrated log-odds: $r=3$ does not mean that the label agrees with the ranking with probability $\sigma(3)=95\%$. The calibrated margin instead lets the log-odds be *proportional* to the gap, estimates the constant from the data, and picks $\gamma_i$ so that the SimPO loss is exactly the negative log-likelihood of that model.
+The SimPO loss $-\log\sigma(r_i-\gamma_i)$ has the form of a negative log-likelihood, so minimising it maximises the likelihood of the observed labels under some Bradley–Terry model. With $\gamma_i=0$ that model takes the reward gap itself as the log-odds that $y_i^w$ is preferred. But $r$ is a score, not a calibrated log-odds: $r=3$ does not mean that the label agrees with the ranking with probability $\sigma(3)\approx0.95$. The calibrated margin instead lets the log-odds be *proportional* to the gap, estimates the constant from the data, and picks $\gamma_i$ so that the SimPO loss is exactly the negative log-likelihood of that model.
 
 #### Motivation: minimising the SimPO loss maximises a likelihood
 
 **A Bradley–Terry model with a temperature.** Assume that the label prefers $y_i^w$ over $y_i^l$ with probability
 
 $$
-p_i=\sigma(k\,r_i),\qquad\text{i.e.}\qquad \log\frac{p_i}{1-p_i}=k\,r_i ,
+p_i=\sigma(kr_i),\qquad\text{i.e.}\qquad \log\frac{p_i}{1-p_i}=kr_i ,
 $$
 
 so the log-odds are proportional to the reward gap. $k>0$ is an inverse temperature: it says how many log-odds one unit of reward gap is worth. The likelihood of the labels of a batch $B$ and its negative logarithm are
 
 $$
 \mathcal L_B(\theta)=\prod_{i\in B}p_i,\qquad
--\log\mathcal L_B(\theta)=-\sum_{i\in B}\log\sigma(k\,r_i).
+-\log\mathcal L_B(\theta)=-\sum_{i\in B}\log\sigma(kr_i).
 $$
 
 $k=1$ gives back the SimPO loss with zero margin.
@@ -95,9 +95,9 @@ $k=1$ gives back the SimPO loss with zero margin.
 **Matching the SimPO loss.** The SimPO loss of each pair equals its term of this negative log-likelihood when
 
 $$
--\log\sigma(r_i-\gamma_i)=-\log\sigma(k\,r_i)
+-\log\sigma(r_i-\gamma_i)=-\log\sigma(kr_i)
 \quad\Longleftrightarrow\quad
-\gamma_i=(1-k)\,r_i .
+\gamma_i=(1-k)\thinspace r_i .
 $$
 
 With this margin, minimising the SimPO loss is maximising the likelihood of the labels under the calibrated model.
@@ -105,21 +105,21 @@ With this margin, minimising the SimPO loss is maximising the likelihood of the 
 **The gradient.** $k$ is estimated from the current batch as $\hat k$ (see "Estimating $k$" below) and held fixed within the step. Then
 
 $$
-\nabla_\theta\big(-\log\mathcal L_B\big)=-\hat k\sum_{i\in B}\sigma(-\hat k\,r_i)\,\nabla_\theta r_i .
+\nabla_\theta\big(-\log\mathcal L_B\big)=-\hat k\sum_{i\in B}\sigma(-\hat k r_i)\thinspace \nabla_\theta r_i .
 $$
 
-The SimPO loss with the detached margin $\gamma_i=(1-\hat k)\,r_i$ has gradient $-\sum_i\sigma(\gamma_i-r_i)\,\nabla_\theta r_i$ (from $\partial L_i/\partial r_i$ above), and $\sigma(\gamma_i-r_i)=\sigma(-\hat k\,r_i)$. Both therefore give every pair the same weight
+The SimPO loss with the detached margin $\gamma_i=(1-\hat k)r_i$ has gradient $-\sum_i\sigma(\gamma_i-r_i)\thinspace \nabla_\theta r_i$ (from $\partial L_i/\partial r_i$ above), and $\sigma(\gamma_i-r_i)=\sigma(-\hat k r_i)$. Both therefore give every pair the same weight
 
 $$
-w_i=-\frac{\partial L_i}{\partial r_i}=\sigma(\gamma_i-r_i)=\sigma(-\hat k\,r_i),
+w_i=-\frac{\partial L_i}{\partial r_i}=\sigma(\gamma_i-r_i)=\sigma(-\hat k r_i),
 $$
 
 and differ only by the common factor $\hat k$: the forward losses are equal, and because the margin is detached, back-propagation leaves the factor out. The SimPO step with the calibrated margin thus points along the gradient of the calibrated log-likelihood, with a raw size that differs by $1/\hat k$ at the same learning rate.
 
-This weight is the only way a detached margin acts on training. Conversely, every weight $w\in(0,1)$ is produced by the margin $\gamma_i=r_i+\mathrm{logit}\,w$, so a margin rule is a rule for sharing the gradient among pairs; since Adam normalises the overall scale of the update, mainly the relative weights matter (training logs the share of $\sum_iw_i$ on misranked pairs as `weight_share_misranked`). Three properties of the calibrated weight follow:
+This weight is the only way a detached margin acts on training. Conversely, every weight $w\in(0,1)$ is produced by the margin $\gamma_i=r_i+\mathrm{logit}\thinspace w$, so a margin rule is a rule for sharing the gradient among pairs; since Adam normalises the overall scale of the update, mainly the relative weights matter (training logs the share of $\sum_iw_i$ on misranked pairs as `weight_share_misranked`). Three properties of the calibrated weight follow:
 
 - *It is the surprise of the observed outcome* under the calibrated model: a correctly ranked pair gets $1-\sigma(\hat k|r_i|)$ and a misranked pair gets $\sigma(\hat k|r_i|)$. The zero margin uses $\sigma(-r_i)$ instead, which treats $r_i$ itself as log-odds.
-- *It changes the temperature of the weights.* For a margin rule $\gamma=g(r)$, $\partial w/\partial r=(g'-1)\,w(1-w)$, so the logit of the weight has slope $g'-1$ in $r$. A fixed γ ($g'=0$) keeps the slope $-1$ and only shifts the sigmoid; the calibrated margin ($g'=1-\hat k$) has slope $-\hat k$, which for $0<\hat k<1$ flattens the weight profile.
+- *It changes the temperature of the weights.* For a margin rule $\gamma=g(r)$, $\partial w/\partial r=(g'-1)\thinspace w(1-w)$, so the logit of the weight has slope $g'-1$ in $r$. A fixed γ ($g'=0$) keeps the slope $-1$ and only shifts the sigmoid; the calibrated margin ($g'=1-\hat k$) has slope $-\hat k$, which for $0<\hat k<1$ flattens the weight profile.
 - *It needs margins of both signs.* With $\gamma_i=0$ a misranked pair already has $w_i>1/2$, so lowering its weight requires a negative margin. For $0<\hat k<1$ the calibrated margin is positive for correctly ranked pairs and negative for misranked ones.
 
 #### Estimating $k$
@@ -127,13 +127,13 @@ This weight is the only way a detached margin acts on training. Conversely, ever
 Assume that the reward gaps of the current pairs are normal, $r\sim\mathcal N(\mu,\sigma^2)$, with density
 
 $$
-p(a)\propto\exp\!\left[-\frac{(a-\mu)^2}{2\sigma^2}\right].
+p(a)\propto\exp\left[-\frac{(a-\mu)^2}{2\sigma^2}\right].
 $$
 
 Every pair is oriented by its label, so among the pairs whose gap has magnitude $a>0$, those with $r=a$ agree with their label and those with $r=-a$ disagree. The log-odds of agreement at $|r|=a$ are therefore the log density ratio, and the model requires them to equal $ka$:
 
 $$
-k\,a=\log\frac{p(a)}{p(-a)}=\frac{(a+\mu)^2-(a-\mu)^2}{2\sigma^2}=\frac{4\mu a}{2\sigma^2}=\frac{2\mu}{\sigma^2}\,a,
+ka=\log\frac{p(a)}{p(-a)}=\frac{(a+\mu)^2-(a-\mu)^2}{2\sigma^2}=\frac{4\mu a}{2\sigma^2}=\frac{2\mu}{\sigma^2}\thinspace a,
 \qquad\text{so}\qquad k=\frac{2\mu}{\sigma^2}.
 $$
 
@@ -150,10 +150,10 @@ The table crosses the sign of $r$ with its size and compares three rules at the 
 
 - *Zero margin*: $\gamma=0$, weight $\sigma(-r)$;
 - *Fixed γ = 1*: SimPO with a constant margin, weight $\sigma(1-r)$;
-- *Calibrated, $\hat k=0.5$*: the calibrated margin at a slope typical of a trained model, weight $\sigma(-0.5\,r)$;
-- *Calibrated margin*: the margin $\gamma=(1-\hat k)\,r$ itself at $\hat k=0.5$, in reward units (for comparison, the fixed rule's margin is 1 for every pair).
+- *Calibrated, $\hat k=0.5$*: the calibrated margin at a slope typical of a trained model, weight $\sigma(-0.5r)$;
+- *Calibrated margin*: the margin $\gamma=(1-\hat k)r$ itself at $\hat k=0.5$, in reward units (for comparison, the fixed rule's margin is 1 for every pair).
 
-| Pair | $r$ | Zero margin: weight $\sigma(-r)$ | Fixed γ = 1: weight $\sigma(1-r)$ | Calibrated, $\hat k=0.5$: weight $\sigma(-0.5\,r)$ | Calibrated margin $(1-\hat k)\,r$, $\hat k=0.5$ | What happens |
+| Pair | $r$ | Zero margin: weight $\sigma(-r)$ | Fixed γ = 1: weight $\sigma(1-r)$ | Calibrated, $\hat k=0.5$: weight $\sigma(-0.5r)$ | Calibrated margin $(1-\hat k)r$, $\hat k=0.5$ | What happens |
 |---|---:|---:|---:|---:|---:|---|
 | confidently correct | +5 | 0.007 | 0.018 | 0.076 | +2.5 | The zero margin treats the pair as solved (weight $\approx e^{-r}$), and a fixed γ = 1 barely changes this: shifting the sigmoid helps only near $r\approx\gamma$. Under the calibrated model a gap of this size agrees with the labels only with probability $\sigma(\hat kr)=0.92$, so the weight is ten times the zero margin's and the positive margin asks for a wider gap. Risk: a gap that is large for the wrong reason, such as a one-token rejected answer, keeps being reinforced. |
 | barely correct | +0.3 | 0.426 | 0.668 | 0.463 | +0.15 | Near zero the zero margin and the calibrated rule both give about 1/2 and the calibrated margin is about zero; a fixed γ = 1 raises the weight on both sides. The calibrated weight has slope $-\hat k/4$ around zero, against $-1/4$ for the zero margin and about $-0.20$ for fixed γ = 1, so it separates the two sides less. This is where ambiguous labels sit (on the untrained model's training pairs, 12–18% of the pairs in the central deciles of $r$ have tied annotation scores, against 5% in the top decile), and near-ties are treated almost symmetrically. |
@@ -162,7 +162,7 @@ The table crosses the sign of $r$ with its size and compares three rules at the 
 
 #### Implementation
 
-`--margin calibrated` (variant `calibrated`) sets $\gamma_i=(1-\hat k)\,r_i$ with $\hat k=2\bar r_B/s_B^2$, the mean and population variance of the current batch's detached gaps, and at least 0.01 (a nonpositive batch mean gives this lower bound). Each step logs $\hat k$ as `calib_k`, and `margin_stats.json` stores its mean over training as `calib_k_mean`.
+`--margin calibrated` (variant `calibrated`) sets $\gamma_i=(1-\hat k)r_i$ with $\hat k=2\bar r_B/s_B^2$, the mean and population variance of the current batch's detached gaps, and at least 0.01 (a nonpositive batch mean gives this lower bound). Each step logs $\hat k$ as `calib_k`, and `margin_stats.json` stores its mean over training as `calib_k_mean`.
 
 ### Advantage: no per-setting γ search
 
@@ -217,7 +217,7 @@ All pairs come from [HuggingFaceH4/ultrafeedback_binarized](https://huggingface.
 | Training data | `data/uf_train4096.jsonl` (4,096 pairs) |
 | Optimisation | AdamW, constant lr 1e-4, β=2, batch 16 pairs, 1 epoch (256 updates), seed 42 |
 | Lengths | prompt ≤192 tokens (keeps the end), prompt + answer ≤384 tokens (keeps the start); EOS counts as an answer token |
-| Variants | fixed γ ∈ {0, 0.5, 1, 1.5, 2, 2.5}, one run each; the calibrated margin $\gamma_i=(1-\hat k)\,r_i$ with $\hat k=2\bar r_B/s_B^2$ of the current batch, trained once |
+| Variants | fixed γ ∈ {0, 0.5, 1, 1.5, 2, 2.5}, one run each; the calibrated margin $\gamma_i=(1-\hat k)r_i$ with $\hat k=2\bar r_B/s_B^2$ of the current batch, trained once |
 | Baseline | the fixed margin with the highest test accuracy (γ = 2), chosen with hindsight |
 | Test pairs | the 1,986 pairs of `data/uf_devtest1986.jsonl` (scored as its two parts with `score_pairs.py`, combined by `research/devtest_scores.py`): pairwise accuracy ($r>0$); each variant is compared with the baseline on the same pairs, with 95% bootstrap intervals over pairs and an exact McNemar test |
 | Generation | The full AlpacaEval set (804 of 805 prompts; the one prompt that exactly matches a training prompt is excluded) and the full Arena-Hard v0.1 set (500 prompts), Qwen chat template with thinking disabled, temperature 0.9, top-p 1, ≤4096 new tokens, 16 prompts per sampling group. Both policies use the same sampling seed per prompt group |
@@ -243,7 +243,7 @@ Run directories: `outputs/run-bs16-lr0.0001-ep1-seed42-C2` (fixed γ ∈ {0, 1, 
 | fixed γ = 2.5 | **73.10%** | 65.96% | −0.10 (−0.81, +0.60) | 0.89 |
 | calibrated | 71.90% | 65.61% | −0.45 (−1.81, +0.81) | 0.53 |
 
-Training accuracy is the fit to the 4,096 training pairs after the single epoch. It keeps rising with γ, while test accuracy rises up to about γ = 1 and is flat from there on. The calibrated margin is 9 pairs behind the best fixed margin, a difference the test cannot distinguish from zero. Log-loss is not comparable between the two rules: the calibrated likelihood does not push the scale of $r$, so the log-loss of the raw gaps is higher (1.07 vs 0.74 on the test pairs). During training $\hat k$ averaged 0.23, and 47.4% of the gradient weight fell on misranked pairs, close to an even split. That split is what the model predicts: if $p(a)/p(-a)=e^{\hat ka}$ (see "Estimating $k$"), then $p(a)\,\sigma(-\hat ka)=p(-a)\,\sigma(\hat ka)$, so at every $|r|$ the correctly ranked and the misranked pairs carry the same total weight.
+Training accuracy is the fit to the 4,096 training pairs after the single epoch. It keeps rising with γ, while test accuracy rises up to about γ = 1 and is flat from there on. The calibrated margin is 9 pairs behind the best fixed margin, a difference the test cannot distinguish from zero. Log-loss is not comparable between the two rules: the calibrated likelihood does not push the scale of $r$, so the log-loss of the raw gaps is higher (1.07 vs 0.74 on the test pairs). During training $\hat k$ averaged 0.23, and 47.4% of the gradient weight fell on misranked pairs, close to an even split. That split is what the model predicts: if $p(a)/p(-a)=e^{\hat ka}$ (see "Estimating $k$"), then $p(a)\thinspace \sigma(-\hat ka)=p(-a)\thinspace \sigma(\hat ka)$, so at every $|r|$ the correctly ranked and the misranked pairs carry the same total weight.
 
 ![Reward accuracy against γ, reward-gap distributions and log-likelihood of chosen responses](figures/png/simpo/simpo_fig3_margin.png)
 
@@ -266,7 +266,7 @@ Generation on the full AlpacaEval set (804 prompts) and the full Arena-Hard v0.1
 | Arena-Hard (500) | calibrated vs Gemma-2B-it | 147 / 55 / 298 | 34.9% (31.0%–38.8%) | 34.5% (25.5%–43.9%) | 89.0% |
 | Arena-Hard (500) | fixed γ = 2 vs Gemma-2B-it | 53 / 20 / 427 | 12.6% (9.9%–15.4%) | 11.1% (7.2%–15.2%) | 96.0% |
 
-The judge chose slot A 54.5% (AlpacaEval) and 53.1% (Arena-Hard) of the time in the head-to-head comparisons. The length-controlled (LC) win rate follows AlpacaEval 2: a logistic model $\mathrm{logit}\,P(\text{win})=a+b\tanh(\Delta/\mathrm{sd}\,\Delta)$ of the per-prompt score (1, 0.5, 0) on the difference $\Delta$ in answer length (characters) is fitted, and the LC win rate is $\sigma(a)$, the win rate with the length term set to zero (`research/lc_winrate.py`; AlpacaEval's instruction-difficulty term needs many models and is left out, so the number is not comparable with the leaderboard). The fitted length coefficient is $b=-0.09$ on AlpacaEval and $b=+0.18$ on Arena-Hard, and the LC win rate stays within one point of the raw one. The gap is not explained by length. Calibrated answers are longer on average (AlpacaEval 431 vs 319 tokens, Arena-Hard 702 vs 500) and in 81% and 85% of prompts, but the win rate does not rise with the length difference:
+The judge chose slot A 54.5% (AlpacaEval) and 53.1% (Arena-Hard) of the time in the head-to-head comparisons. The length-controlled (LC) win rate follows AlpacaEval 2: a logistic model $\mathrm{logit}\thinspace P(\text{win})=a+b\tanh(\Delta/\mathrm{sd}\thinspace \Delta)$ of the per-prompt score (1, 0.5, 0) on the difference $\Delta$ in answer length (characters) is fitted, and the LC win rate is $\sigma(a)$, the win rate with the length term set to zero (`research/lc_winrate.py`; AlpacaEval's instruction-difficulty term needs many models and is left out, so the number is not comparable with the leaderboard). The fitted length coefficient is $b=-0.09$ on AlpacaEval and $b=+0.18$ on Arena-Hard, and the LC win rate stays within one point of the raw one. The gap is not explained by length. Calibrated answers are longer on average (AlpacaEval 431 vs 319 tokens, Arena-Hard 702 vs 500) and in 81% and 85% of prompts, but the win rate does not rise with the length difference:
 
 | Calibrated answer vs baseline | AlpacaEval prompts | AlpacaEval win rate | Arena-Hard prompts | Arena-Hard win rate |
 |---|---:|---:|---:|---:|
