@@ -5,7 +5,8 @@ accuracy (r > 0), accuracy on pairs whose annotation scores are not tied, mean
 log-loss softplus(-r) and the mean reward gap r. Writes RUN/<split>_scores.json and
 RUN/<split>_scores.csv. With --split dev (the default) the fixed-margin adapter with
 the highest accuracy is selected, ties broken by lower log-loss and then smaller
-gamma, and written to RUN/selection.json. --split test only reports.
+gamma, and written to RUN/selection.json. --split test and --split train (the training pairs,
+for training accuracy) only report.
 """
 import argparse
 import csv
@@ -31,14 +32,15 @@ def select_fixed(results):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("run", type=Path)
-    p.add_argument("--split", choices=("dev", "test"), default="dev")
-    p.add_argument("--data", type=Path, help="default: data/uf_dev500.jsonl or data/uf_test1486.jsonl")
+    p.add_argument("--split", choices=("dev", "test", "train"), default="dev")
+    p.add_argument("--data", type=Path, help="default: data/uf_dev500.jsonl, data/uf_test1486.jsonl or data/uf_train4096.jsonl")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--no-base", action="store_true", help="skip scoring the untrained base model")
     p.add_argument("--adapters", nargs="+", help="only score these adapter directory names")
     args = p.parse_args(argv)
     if args.data is None:
-        args.data = HERE / ("data/uf_dev500.jsonl" if args.split == "dev" else "data/uf_test1486.jsonl")
+        args.data = HERE / {"dev": "data/uf_dev500.jsonl", "test": "data/uf_test1486.jsonl",
+                             "train": "data/uf_train4096.jsonl"}[args.split]
     rows = read_jsonl(args.data)
     if not rows:
         p.error(f"empty {args.split} dataset")
@@ -73,8 +75,9 @@ def main(argv=None):
             if ctx is not None:
                 ctx.__exit__(None, None, None)
         gap = torch.cat(gaps)
-        res = dict(adapter=name, margin="base" if name == "base" else cfg["margin"],
-                   gamma=cfg["gamma"] if name != "base" and cfg["margin"] == "fixed" else None,
+        kind = "base" if name == "base" else "dpo" if cfg.get("loss") == "dpo" else cfg["margin"]
+        res = dict(adapter=name, margin=kind,
+                   gamma=cfg["gamma"] if kind == "fixed" else None,
                    pairs=len(rows), correct=int((gap > 0).sum()),
                    accuracy=(gap > 0).float().mean().item(),
                    accuracy_untied=(gap[strict] > 0).float().mean().item() if strict.any() else None,

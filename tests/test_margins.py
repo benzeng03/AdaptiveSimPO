@@ -4,7 +4,7 @@ import unittest
 import torch
 from torch.nn import functional as F
 
-from adaptive_simpo.margins import K_MIN, MarginConfig, calibration_slope, compute_margins, simpo_loss
+from adaptive_simpo.margins import K_MIN, MarginConfig, calibration_slope, compute_margins, dpo_loss, simpo_loss
 
 CALIBRATED = MarginConfig(kind="calibrated")
 
@@ -126,6 +126,34 @@ class LossTests(unittest.TestCase):
         loss.backward()
         self.assertEqual(gamma.tolist(), [0.0, 0.0])
         self.assertTrue((chosen.grad < 0).all())
+
+
+class DPOTests(unittest.TestCase):
+    def test_loss_and_gradient(self):
+        pc = torch.tensor([-10.0, -20.0, -5.0], requires_grad=True)
+        pr = torch.tensor([-12.0, -15.0, -5.0], requires_grad=True)
+        rc, rr = torch.tensor([-11.0, -19.0, -6.0]), torch.tensor([-11.0, -16.0, -4.0])
+        loss, scores, gamma, s = dpo_loss(pc, pr, rc, rr, 0.1)
+        r = 0.1 * ((pc - rc) - (pr - rr)).detach()
+        torch.testing.assert_close(scores, r)
+        torch.testing.assert_close(loss, F.softplus(-r).mean())
+        self.assertEqual(gamma.tolist(), [0.0, 0.0, 0.0])
+        loss.backward()
+        w = torch.sigmoid(-r)
+        torch.testing.assert_close(pc.grad, -0.1 * w / 3)
+        torch.testing.assert_close(pr.grad, 0.1 * w / 3)
+        self.assertAlmostEqual(s["weight_share_misranked"], (w * (r < 0)).sum().item() / w.sum().item(), places=6)
+
+    def test_policy_equal_to_reference_gives_log2(self):
+        x = torch.tensor([-3.0, -7.0])
+        loss, _, _, _ = dpo_loss(x, x + 1, x, x + 1, 0.5)
+        self.assertAlmostEqual(loss.item(), math.log(2), places=6)
+
+    def test_rejects_bad_input(self):
+        with self.assertRaises(ValueError):
+            dpo_loss(torch.zeros(2), torch.zeros(2), torch.zeros(3), torch.zeros(2), 0.1)
+        with self.assertRaises(ValueError):
+            dpo_loss(torch.zeros(2), torch.zeros(2), torch.zeros(2), torch.zeros(2), 0.0)
 
 
 if __name__ == "__main__":

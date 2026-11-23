@@ -25,7 +25,22 @@ from pathlib import Path
 
 import numpy as np
 
-CODEX = r"C:\Program Files\WindowsApps\OpenAI.Codex_26.1117.3838.0_x64__2p2nqsd0c76g0\app\resources\codex.exe"
+
+def find_codex():
+    """codex.exe inside the installed Codex desktop app, else `codex` on PATH. The package folder
+    changes on every app update, and WindowsApps cannot be listed, so ask Get-AppxPackage."""
+    try:
+        res = subprocess.run(["powershell", "-NoProfile", "-Command",
+                              "(Get-AppxPackage -Name OpenAI.Codex).InstallLocation"],
+                             capture_output=True, text=True, timeout=60)
+        for loc in filter(None, map(str.strip, res.stdout.splitlines())):
+            exe = Path(loc) / "app" / "resources" / "codex.exe"
+            if exe.exists():
+                return str(exe)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "codex"
+
 
 INSTRUCTIONS = """You are an expert evaluator of AI assistant responses. For each item below you get a user instruction and two responses, A and B, from two different assistants. Decide which response better follows the instruction: helpful, correct, relevant, coherent and complete. Judge the content, not the length: a longer response is better only if the extra content is useful. Ignore which response comes first. Answer "tie" only if the two are genuinely equal in quality.
 
@@ -113,9 +128,10 @@ def main(argv=None):
     p.add_argument("--retries", type=int, default=2)
     p.add_argument("--timeout", type=int, default=1800)
     p.add_argument("--limit", type=int, help="judge only the first N prompts (for testing)")
-    p.add_argument("--codex", default=CODEX)
+    p.add_argument("--codex", default=None, help="codex executable (default: the installed Codex app)")
     p.add_argument("--seed", type=int, default=0)
     a = p.parse_args(argv)
+    a.codex = a.codex or find_codex()
     a.gen = a.gen.resolve()          # codex runs in a temporary directory, so paths must be absolute
 
     var, base = load_generations(a.gen, a.variant), load_generations(a.gen, a.baseline)

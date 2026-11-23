@@ -1,5 +1,6 @@
 """CPU smoke test: train -> dev/test scoring -> summary -> generation with a tiny random Qwen3."""
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,6 +55,18 @@ class PipelineSmokeTest(unittest.TestCase):
 
             dev = tmp / "dev.jsonl"
             dev.write_text("\n".join(json.dumps(r) for r in data[:4]), encoding="utf-8")
+
+            # DPO: the reference is the model with the adapter disabled, and the fresh LoRA
+            # adapter is a no-op, so the first loss is exactly log 2.
+            dpo_run = tmp / "dpo-run"
+            train.main(common + ["--loss", "dpo", "--output", str(dpo_run / "dpo-b0.1")])
+            first_dpo = json.loads((dpo_run / "dpo-b0.1" / "metrics.jsonl").read_text().splitlines()[0])
+            self.assertAlmostEqual(first_dpo["loss"], math.log(2), places=5)
+            dpo_stats = json.loads((dpo_run / "dpo-b0.1" / "margin_stats.json").read_text())
+            self.assertEqual((dpo_stats["variant"], dpo_stats["loss"], dpo_stats["steps"]), ("dpo-b0.1", "dpo", 2))
+            score_pairs.main([str(dpo_run), "--split", "test", "--data", str(dev), "--batch-size", "2", "--no-base"])
+            self.assertEqual(json.loads((dpo_run / "test_scores.json").read_text())[0]["margin"], "dpo")
+
             score_pairs.main([str(run), "--data", str(dev), "--batch-size", "2"])
             scores = json.loads((run / "dev_scores.json").read_text())
             self.assertEqual([s["adapter"] for s in scores], ["base", "calibrated", "fixed-g0.5", "fixed-g0.75"])

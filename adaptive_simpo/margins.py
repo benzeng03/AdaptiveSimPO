@@ -104,3 +104,25 @@ def simpo_loss(chosen_logps, rejected_logps, beta, cfg: MarginConfig):
                      weight_share_misranked=(w * (scores.detach() < 0)).sum().item() / w.sum().item())
     loss = F.softplus(gamma.detach() - scores).mean()
     return loss, scores.detach(), gamma.detach(), stats
+
+
+def dpo_loss(policy_chosen, policy_rejected, ref_chosen, ref_rejected, beta):
+    """Mean DPO loss (Rafailov et al., 2023) on summed log probabilities.
+
+    r_i = beta * ((log pi(y_w|x) - log ref(y_w|x)) - (log pi(y_l|x) - log ref(y_l|x))),
+    L_i = softplus(-r_i). Returns (loss, scores, gamma, stats) like simpo_loss, with gamma = 0
+    and gradient weights w_i = sigmoid(-r_i).
+    """
+    if not math.isfinite(beta) or beta <= 0:
+        raise ValueError("beta must be positive and finite")
+    shapes = {t.shape for t in (policy_chosen, policy_rejected, ref_chosen, ref_rejected)}
+    if len(shapes) != 1:
+        raise ValueError("expected paired policy/reference log probabilities")
+    ref = (ref_chosen.detach().float() - ref_rejected.detach().float())
+    scores = beta * (policy_chosen.float() - policy_rejected.float() - ref)
+    gamma, stats = compute_margins(scores, MarginConfig("fixed", 0.0))
+    with torch.no_grad():
+        w = torch.sigmoid(-scores.detach())
+        stats.update(weight_mean=w.mean().item(),
+                     weight_share_misranked=(w * (scores.detach() < 0)).sum().item() / w.sum().item())
+    return F.softplus(-scores).mean(), scores.detach(), gamma, stats

@@ -50,7 +50,7 @@ def encode_pair(row, tokenizer, max_length, max_prompt, chat_prompt=True):
     return result
 
 
-def _chunked_answer_logps(lm, ids, mask, labels, chunk=64):
+def _chunked_answer_logps(lm, ids, mask, labels, chunk=64, average=True):
     """Project only answer positions through lm_head, in checkpointed chunks.
 
     Avoids materialising (batch, length, vocab) logits for 150k-vocab models."""
@@ -70,11 +70,12 @@ def _chunked_answer_logps(lm, ids, mask, labels, chunk=64):
             parts.append(token_nll(states, tokens))
     nll = torch.cat(parts)
     totals = nll.new_zeros(ids.size(0)).index_add(0, seq, nll)
-    return -totals / targets.ne(-100).sum(1)
+    return -totals / targets.ne(-100).sum(1) if average else -totals
 
 
-def batch_logps(model, rows, tokenizer, max_length, max_prompt, device, chat_prompt=True):
-    """Mean per-token log-probabilities (chosen, rejected) for a list of pairs."""
+def batch_logps(model, rows, tokenizer, max_length, max_prompt, device, chat_prompt=True, average=True):
+    """Per-token mean (average=True, SimPO) or summed (average=False, DPO) log-probabilities
+    (chosen, rejected) for a list of pairs."""
     encoded = [encode_pair(r, tokenizer, max_length, max_prompt, chat_prompt) for r in rows]
     sequences = [pair[i] for i in (0, 1) for pair in encoded]
     width = max(len(ids) for ids, _ in sequences)
@@ -89,13 +90,13 @@ def batch_logps(model, rows, tokenizer, max_length, max_prompt, device, chat_pro
     ids, mask, labels = ids.to(device), mask.to(device), labels.to(device)
     lm = model.get_base_model() if hasattr(model, "peft_config") else model
     if hasattr(lm, "model") and hasattr(lm, "lm_head"):
-        logps = _chunked_answer_logps(lm, ids, mask, labels)
+        logps = _chunked_answer_logps(lm, ids, mask, labels, average=average)
     else:
         logits = model(input_ids=ids, attention_mask=mask, use_cache=False).logits
         targets = labels[:, 1:]
         nll = F.cross_entropy(logits[:, :-1].float().transpose(1, 2), targets,
                               ignore_index=-100, reduction="none")
-        logps = -nll.sum(1) / targets.ne(-100).sum(1)
+        logps = -nll.sum(1) / targets.ne(-100).sum(1) if average else -nll.sum(1)
     return logps.chunk(2)
 
 

@@ -65,7 +65,18 @@ def main(argv=None):
     p.add_argument("--top-p", type=float, default=1.0)
     p.add_argument("--max-new-tokens", type=int, default=4096)
     p.add_argument("--device", default="cuda")
+    p.add_argument("--gpu-mem-fraction", type=float, default=0.9,
+                   help="cap on the CUDA caching allocator (fraction of device memory); the growing KV "
+                        "cache fragments memory, and without a cap Windows spills it into slow shared "
+                        "memory instead of reusing cached blocks. 0 disables the cap")
+    p.add_argument("--max-new", type=int, default=0,
+                   help="stop after writing this many new group files (0 = no limit); used to rerun only "
+                        "the group that ran out of memory under the cap, without the cap")
     args = p.parse_args(argv)
+    if args.device.startswith("cuda") and args.gpu_mem_fraction > 0 and torch.cuda.is_available():
+        dev = torch.device(args.device)
+        torch.cuda.set_per_process_memory_fraction(
+            args.gpu_mem_fraction, dev.index if dev.index is not None else torch.cuda.current_device())
     adapters = parse_adapters(args.adapter)
     names = (["base"] if args.base else []) + list(adapters)
     if not names:
@@ -84,8 +95,11 @@ def main(argv=None):
     model = load_policy(args.model, adapters, args.device, bf16=True)
     eos = model.generation_config.eos_token_id
     eos = set(eos if isinstance(eos, list) else [eos])
-    total, done = len(indices) * len(names), 0
+    total, done, new = len(indices) * len(names), 0, 0
     for g in range(0, len(indices), args.group):
+        if args.max_new and new >= args.max_new:
+            print(f"[generate] stopping after {new} new group file(s) (--max-new)")
+            return
         chosen = indices[g:g + args.group]
         texts = [tok.apply_chat_template([{"role": "user", "content": data[i]["instruction"]}],
                                          tokenize=False, add_generation_prompt=True,
@@ -96,6 +110,8 @@ def main(argv=None):
             if dest.exists():
                 done += len(chosen)
                 continue
+            if args.max_new and new >= args.max_new:
+                break
             torch.manual_seed(args.seed + g)
             gen_kwargs = dict(do_sample=True, temperature=args.temperature, top_p=args.top_p, top_k=0,
                               max_new_tokens=args.max_new_tokens, pad_token_id=tok.pad_token_id)
@@ -115,7 +131,11 @@ def main(argv=None):
             tmp = dest.with_suffix(".tmp")
             tmp.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
             tmp.replace(dest)
+            del seq
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             done += len(chosen)
+            new += 1
             print(f"[generate] {name} prompts {g + 1}-{g + len(chosen)} | {done}/{total}", flush=True)
     print(f"[generate] done -> {args.output}")
 

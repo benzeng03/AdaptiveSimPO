@@ -1,6 +1,6 @@
 # AdaptiveSimPO
 
-SimPO (Meng et al., 2024) trains a policy to rank preferred responses above rejected ones with a single fixed target reward margin γ. The best γ varies across models and datasets, so it is usually chosen by grid search, which costs one full training run per candidate value and requires held-out data for model selection. We propose a **calibrated margin** $\gamma_i=(1-\hat k)\,r_i$, obtained by reading the SimPO loss as the negative log-likelihood of a Bradley–Terry model whose log-odds are proportional to the reward gap, $\log\frac{p_i}{1-p_i}=k\,r_i$. Under a normal approximation to the reward gaps the slope has the closed form $k=2\mu/\sigma^2$, which we estimate from every batch. The margin therefore has no free magnitude to tune, and a single training run replaces both the γ grid and the selection step. On Qwen3-0.6B fine-tuned with LoRA on 4,096 UltraFeedback pairs, the untuned calibrated margin matches the fixed margin selected on development pairs from γ ∈ {0, 1, 2} in held-out preference accuracy (65.6% vs. 66.3%, exact McNemar p = 0.42) and reaches a win rate of 82.8% against it in pairwise generation comparisons judged by GPT-6.2-Sol (ties count as half).
+SimPO (Meng et al., 2024) trains a policy to rank preferred responses above rejected ones with a single fixed target reward margin γ. The best γ varies across models and datasets, so it is usually chosen by grid search, which costs one full training run per candidate value and requires held-out data for model selection. We propose a **calibrated margin** $\gamma_i=(1-\hat k)\,r_i$, obtained by reading the SimPO loss as the negative log-likelihood of a Bradley–Terry model whose log-odds are proportional to the reward gap, $\log\frac{p_i}{1-p_i}=k\,r_i$. Under a normal approximation to the reward gaps the slope has the closed form $k=2\mu/\sigma^2$, which we estimate from every batch. The margin therefore has no free magnitude to tune, and a single training run replaces both the γ grid and the selection step. On Qwen3-0.6B fine-tuned with LoRA on 4,096 UltraFeedback pairs, the untuned calibrated margin matches the best fixed margin from γ ∈ {0, 0.5, 1, 1.5, 2, 2.5}, chosen with hindsight on the 1,986 test pairs, in held-out preference accuracy (65.6% vs. 66.1%, exact McNemar p = 0.53) and reaches win rates of 82.3% on the full AlpacaEval set (804 prompts) and 88.0% on the full Arena-Hard v0.1 set (500 prompts) against it in pairwise generation comparisons judged by GPT-6.2-Sol (ties count as half; length-controlled 82.8% and 87.3%). Against the public answers of Gemma-2B-it, which both 0.6B policies lose to, the calibrated policy wins 26.7% (AlpacaEval) and 34.9% (Arena-Hard) of the prompts, against 13.3% and 12.6% for the fixed margin.
 
 ## Setup
 
@@ -172,7 +172,7 @@ The calibrated margin removes this search:
 
 - **The margin is set from the data during training.** $\hat k$ is recomputed from every batch, so the margins follow the state of training with no schedule.
 - **Scale-free.** Rescaling every gap, for example by a different β, rescales $\hat k$ inversely and leaves the weights unchanged (except at the lower bound of $\hat k$).
-- **Lower cost.** One calibrated run replaces the fixed-γ grid plus the selection step. In the experiment below the fixed baseline is chosen from three trained candidates on development pairs; the calibrated margin is trained once.
+- **Lower cost.** One calibrated run replaces the fixed-γ grid plus the selection step. In the experiment below the fixed baseline is the best of six trained candidates, picked on the test pairs themselves; the calibrated margin is trained once.
 
 The lower bound of $\hat k$ is a fixed implementation choice, and the learning rate was not tuned for either rule.
 
@@ -182,7 +182,8 @@ The lower bound of $\hat k$ is a fixed implementation choice, and the learning r
 - **$\hat k$ comes from 16 gaps.** The per-batch estimate is noisy (0.02–0.77 early in training).
 - The objective ignores the scale of $r$, which is left to the optimiser (learning rate, Adam).
 - Ranking accuracy is not generation quality.
-- The experiment uses one seed, one model size (Qwen3-0.6B), 4,096 training pairs, 128 generation prompts and one judge.
+- The experiment uses one seed, one model size (Qwen3-0.6B), 4,096 training pairs and one judge; generalisation to larger models is untested.
+- Other definitions of the reward gap $r$ (another length normalisation, or a reference-based reward) are not explored.
 
 ### Related work
 
@@ -190,20 +191,23 @@ Several methods adapt the per-pair margin or weight of DPO-style objectives. AMa
 
 ## Data
 
-All pairs come from [HuggingFaceH4/ultrafeedback_binarized](https://huggingface.co/datasets/HuggingFaceH4/ultrafeedback_binarized): training pairs from the `train_prefs` split, development and test pairs from `test_prefs`.
+All pairs come from [HuggingFaceH4/ultrafeedback_binarized](https://huggingface.co/datasets/HuggingFaceH4/ultrafeedback_binarized): training pairs from the `train_prefs` split, test pairs from `test_prefs`.
 
 | File | Contents |
 |---|---|
 | `data/ultrafeedback_binarized/train_prefs-00000-of-00001.parquet` | Official `train_prefs` split, 61,135 pairs (local only, 226 MB) |
 | `data/ultrafeedback_binarized/test_prefs-00000-of-00001.parquet` | Official `test_prefs` split, 2,000 pairs (local only) |
 | `data/uf_train4096.jsonl` | 4,096 training pairs from `train_prefs` (local only; built by `prepare_data.py`) |
-| `data/uf_dev500.jsonl` | 500 development pairs from `test_prefs`, used only to select the fixed baseline (local only) |
-| `data/uf_test1486.jsonl` | The remaining 1,486 eligible `test_prefs` pairs, used only for reporting (local only) |
+| `data/uf_devtest1986.jsonl` | The 1,986 test pairs: all eligible `test_prefs` pairs, the concatenation of the two files below (local only) |
+| `data/uf_dev500.jsonl`, `data/uf_test1486.jsonl` | The first 500 and the remaining 1,486 test pairs. `prepare_data.py` writes them separately and `score_pairs.py --split dev` / `--split test` scores them separately (local only) |
 | `data/uf_original_train.jsonl` | 256-pair subset kept in the repository (the first 256 rows of `uf_train4096.jsonl`), used by the smoke test |
 | `data/uf_original_test.jsonl` | 64-pair subset kept in the repository (the first 64 rows of `uf_dev500.jsonl`) |
 | `data/alpaca_eval_gpt4_baseline.json` | 805 AlpacaEval instructions with GPT-4 reference answers, used for generation |
+| `data/arena-hard-v0.1/question.jsonl` | 500 Arena-Hard v0.1 questions from `lm-sys/arena-hard-auto`, used for generation (local only) |
+| `data/alpaca_eval_results/gemma-2b-it/model_outputs.json` | The public AlpacaEval outputs of Gemma-2B-it (805 answers, 22 of them empty), from `tatsu-lab/alpaca_eval` (local only) |
+| `data/arena-hard-v0.1/model_answer/gemma-2b-it.jsonl` | The public Arena-Hard v0.1 answers of Gemma-2B-it (500), from the Hugging Face dataset `lmarena-ai/arena-hard-auto` (local only); `gemma-2b-it_outputs.json` holds the same answers in question order |
 
-`prepare_data.py` keeps the two small subsets as prefixes and samples the rest with seed 42. No prompt appears in more than one split, and pairs with an empty or identical chosen and rejected answer are skipped. The JSONL rows are `{"prompt", "chosen", "rejected", "score_chosen", "score_rejected"}`: the whitespace-stripped prompt, the final chosen and rejected assistant messages, and the UltraFeedback annotation scores (the two small subsets keep only the first three fields). The annotation scores are tied in 482 training, 74 development and 196 test pairs. Such a label carries no preference, so scoring also reports accuracy on the untied pairs.
+`prepare_data.py` keeps the two small subsets as prefixes and samples the rest with seed 42. No prompt appears in more than one split, and pairs with an empty or identical chosen and rejected answer are skipped. The JSONL rows are `{"prompt", "chosen", "rejected", "score_chosen", "score_rejected"}`: the whitespace-stripped prompt, the final chosen and rejected assistant messages, and the UltraFeedback annotation scores (the two small subsets keep only the first three fields). The annotation scores are tied in 482 training and 270 test pairs. Such a label carries no preference, so scoring also reports accuracy on the untied pairs.
 
 ## Experiment
 
@@ -213,46 +217,86 @@ All pairs come from [HuggingFaceH4/ultrafeedback_binarized](https://huggingface.
 | Training data | `data/uf_train4096.jsonl` (4,096 pairs) |
 | Optimisation | AdamW, constant lr 1e-4, β=2, batch 16 pairs, 1 epoch (256 updates), seed 42 |
 | Lengths | prompt ≤192 tokens (keeps the end), prompt + answer ≤384 tokens (keeps the start); EOS counts as an answer token |
-| Variants | fixed γ ∈ {0, 1, 2}; the calibrated margin $\gamma_i=(1-\hat k)\,r_i$ with $\hat k=2\bar r_B/s_B^2$ of the current batch, trained once |
-| Baseline selection | `data/uf_dev500.jsonl`: highest pairwise accuracy ($r>0$) among the fixed margins, ties broken by lower mean $\mathrm{softplus}(-r)$, then smaller γ |
-| Test pairs | `data/uf_test1486.jsonl`: accuracy, accuracy on untied pairs and log-loss; each variant is compared with the baseline on the same pairs, with 95% bootstrap intervals over pairs and an exact McNemar test |
-| Generation | 128 AlpacaEval prompts sampled with seed 42 (exact training-prompt matches excluded), Qwen chat template with thinking disabled, temperature 0.9, top-p 1, ≤4096 new tokens, 16 prompts per sampling group. Both policies use the same sampling seed per prompt group |
+| Variants | fixed γ ∈ {0, 0.5, 1, 1.5, 2, 2.5}, one run each; the calibrated margin $\gamma_i=(1-\hat k)\,r_i$ with $\hat k=2\bar r_B/s_B^2$ of the current batch, trained once |
+| Baseline | the fixed margin with the highest test accuracy (γ = 2), chosen with hindsight |
+| Test pairs | the 1,986 pairs of `data/uf_devtest1986.jsonl` (scored as its two parts with `score_pairs.py`, combined by `research/devtest_scores.py`): pairwise accuracy ($r>0$); each variant is compared with the baseline on the same pairs, with 95% bootstrap intervals over pairs and an exact McNemar test |
+| Generation | The full AlpacaEval set (804 of 805 prompts; the one prompt that exactly matches a training prompt is excluded) and the full Arena-Hard v0.1 set (500 prompts), Qwen chat template with thinking disabled, temperature 0.9, top-p 1, ≤4096 new tokens, 16 prompts per sampling group. Both policies use the same sampling seed per prompt group |
+| External models | The public answers of Gemma-2B-it on both prompt sets, and the GPT-4 Turbo reference answers of AlpacaEval, added to the generation directories as one more policy (`research/add_reference.py`) and judged in the same way |
 | Judge | GPT-6.2-Sol (medium reasoning, through the Codex CLI; `research/llm_judge.py`), in both answer orders: a win needs both orders to agree, anything else is a tie. Win rate $=(W+0.5T)/N$ with a 95% prompt-bootstrap interval |
 
-The development pairs are used only to choose the fixed γ; test pairs and generation results are never used for tuning. The win rates are local head-to-head comparisons, not official AlpacaEval 2 scores.
+There is no separate development set. The fixed baseline is the best fixed margin on the test pairs, which tilts the comparison in its favour; the calibrated margin is not tuned on anything. The win rates are local comparisons with one judge, not official AlpacaEval 2 or Arena-Hard scores.
 
 ## Results
 
-Run directory: `outputs/run-bs16-lr0.0001-ep1-seed42-C2`, where the calibrated adapter is stored as `calibrated-batch`. The fixed baseline is chosen from γ ∈ {0, 1, 2} on the 500 development pairs by accuracy, then log-loss; the calibrated margin is trained once, with no tuning.
+Run directories: `outputs/run-bs16-lr0.0001-ep1-seed42-C2` (fixed γ ∈ {0, 1, 2} and the calibrated adapter, stored as `calibrated-batch`), `outputs/run-bs16-lr0.0001-ep1-seed42-AB` (γ = 0.5, 1.5) and `outputs/run-bs16-lr0.0001-ep1-seed42-20261122-g2.5-g3` (γ = 2.5). All share the configuration above; the calibrated margin is trained once, with no tuning.
 
 ### Preference pairs
 
-| Variant | Dev acc | Test acc | Test Δ vs fixed γ = 2 (95% CI) | McNemar p |
+| Variant | Train acc (4,096 pairs) | Test acc (1,986 pairs) | Δ test vs fixed γ = 2 (95% CI) | McNemar p |
 |---|---:|---:|---:|---:|
-| fixed γ = 0 | 63.6% | 63.66% | −2.62 (−4.24, −1.08) | 0.002 |
-| fixed γ = 1 | 65.2% | 65.55% | −0.74 (−1.95, +0.47) | 0.29 |
-| **fixed γ = 2** (selected) | **65.4%** | **66.29%** | baseline | — |
-| calibrated | 65.6% | 65.61% | −0.67 (−2.15, +0.81) | 0.42 |
+| untrained model | 56.30% | 55.19% | −10.88 (−13.44, −8.46) | <0.001 |
+| fixed γ = 0 | 69.65% | 63.65% | −2.42 (−3.83, −1.01) | <0.001 |
+| fixed γ = 0.5 | 70.97% | 64.80% | −1.26 (−2.42, −0.05) | 0.050 |
+| fixed γ = 1 | 71.34% | 65.46% | −0.60 (−1.66, +0.45) | 0.31 |
+| fixed γ = 1.5 | 72.00% | 65.56% | −0.50 (−1.31, +0.25) | 0.25 |
+| **fixed γ = 2** (best on test) | 72.58% | **66.06%** | baseline | — |
+| fixed γ = 2.5 | **73.10%** | 65.96% | −0.10 (−0.81, +0.60) | 0.89 |
+| calibrated | 71.90% | 65.61% | −0.45 (−1.81, +0.81) | 0.53 |
 
-Log-loss is not comparable between the two rules: the calibrated likelihood does not push the scale of $r$, so the log-loss of the raw gaps is higher (development 1.24 vs 0.84). During training $\hat k$ averaged 0.23, and 47.4% of the gradient weight fell on misranked pairs, close to an even split. That split is what the model predicts: if $p(a)/p(-a)=e^{\hat ka}$ (see "Estimating $k$"), then $p(a)\,\sigma(-\hat ka)=p(-a)\,\sigma(\hat ka)$, so at every $|r|$ the correctly ranked and the misranked pairs carry the same total weight.
+Training accuracy is the fit to the 4,096 training pairs after the single epoch. It keeps rising with γ, while test accuracy rises up to about γ = 1 and is flat from there on. The calibrated margin is 9 pairs behind the best fixed margin, a difference the test cannot distinguish from zero. Log-loss is not comparable between the two rules: the calibrated likelihood does not push the scale of $r$, so the log-loss of the raw gaps is higher (1.07 vs 0.74 on the test pairs). During training $\hat k$ averaged 0.23, and 47.4% of the gradient weight fell on misranked pairs, close to an even split. That split is what the model predicts: if $p(a)/p(-a)=e^{\hat ka}$ (see "Estimating $k$"), then $p(a)\,\sigma(-\hat ka)=p(-a)\,\sigma(\hat ka)$, so at every $|r|$ the correctly ranked and the misranked pairs carry the same total weight.
+
+![Reward accuracy against γ, reward-gap distributions and log-likelihood of chosen responses](figures/png/simpo/simpo_fig3_margin.png)
+
+*Drawn after Figure 3 of the SimPO paper. (a) Train and test accuracy of the fixed margins against γ, with the calibrated margin as horizontal lines (the figure labels the 1,986 test pairs "val"). (b) Distribution of the reward gap $r$ on the test pairs. (c) Average per-token log-probability of the chosen responses on the test pairs.*
+
+The calibrated margin produces a wider distribution of reward gaps and a lower log-likelihood of $y^w$ than any fixed γ: the mean average log-probability of the chosen responses is −4.41, against −2.65 for γ = 0 down to −3.24 for γ = 2.5, and −1.96 before training. This holds although its mean margin during training (1.02) is about that of γ = 1 and below those of γ ≥ 1.5. The calibrated likelihood does not tie the gaps to a target, so the scale of $r$ grows more freely, which is also why its log-loss on raw gaps is higher.
 
 ### Generation
 
-Generation on 128 AlpacaEval prompts (no answer unfinished), calibrated vs fixed γ = 2, judged by GPT-6.2-Sol. Every prompt is judged in both answer orders, in separate calls of 8 prompts, with the calibrated answer in slot A for half of the prompts in each pass; the calibrated answer wins a prompt only if both orders prefer it, loses if both prefer the baseline, and otherwise ties.
+Generation on the full AlpacaEval set (804 prompts) and the full Arena-Hard v0.1 set (500 prompts), judged by GPT-6.2-Sol. Every answer ended before the 4,096-token limit (longest 2,259 tokens). Every prompt is judged in both answer orders, in separate calls of 8 prompts, with the first-named answer in slot A for half of the prompts in each pass; it wins a prompt only if both orders prefer it, loses if both prefer the other answer, and otherwise ties.
 
-| Comparison | Wins / ties / losses | Win rate (95% CI) | LC win rate (95% CI) | Order-consistent |
+| Prompts | Comparison | Wins / ties / losses | Win rate (95% CI) | LC win rate (95% CI) | Order-consistent |
+|---|---|---:|---:|---:|---:|
+| AlpacaEval (804) | calibrated vs fixed γ = 2 | 617 / 90 / 97 | 82.3% (80.0%–84.7%) | 82.8% (80.0%–85.7%) | 89.2% |
+| Arena-Hard (500) | calibrated vs fixed γ = 2 | 420 / 40 / 40 | 88.0% (85.4%–90.5%) | 87.3% (84.1%–90.6%) | 92.0% |
+| AlpacaEval (804) | calibrated vs GPT-4 reference | 8 / 5 / 791 | 1.3% (0.6%–2.1%) | 1.3% (0.6%–2.0%) | 99.5% |
+| AlpacaEval (804) | fixed γ = 2 vs GPT-4 reference | 4 / 1 / 799 | 0.6% (0.1%–1.1%) | 0.5% (0.0%–1.1%) | 100% |
+| AlpacaEval (804) | calibrated vs Gemma-2B-it | 187 / 55 / 562 | 26.7% (23.8%–29.7%) | 25.7% (20.7%–30.4%) | 93.3% |
+| AlpacaEval (804) | fixed γ = 2 vs Gemma-2B-it | 90 / 34 / 680 | 13.3% (11.1%–15.6%) | 11.7% (8.9%–14.6%) | 95.8% |
+| Arena-Hard (500) | calibrated vs Gemma-2B-it | 147 / 55 / 298 | 34.9% (31.0%–38.8%) | 34.5% (25.5%–43.9%) | 89.0% |
+| Arena-Hard (500) | fixed γ = 2 vs Gemma-2B-it | 53 / 20 / 427 | 12.6% (9.9%–15.4%) | 11.1% (7.2%–15.2%) | 96.0% |
+
+The judge chose slot A 54.5% (AlpacaEval) and 53.1% (Arena-Hard) of the time in the head-to-head comparisons. The length-controlled (LC) win rate follows AlpacaEval 2: a logistic model $\mathrm{logit}\,P(\text{win})=a+b\tanh(\Delta/\mathrm{sd}\,\Delta)$ of the per-prompt score (1, 0.5, 0) on the difference $\Delta$ in answer length (characters) is fitted, and the LC win rate is $\sigma(a)$, the win rate with the length term set to zero (`research/lc_winrate.py`; AlpacaEval's instruction-difficulty term needs many models and is left out, so the number is not comparable with the leaderboard). The fitted length coefficient is $b=-0.09$ on AlpacaEval and $b=+0.18$ on Arena-Hard, and the LC win rate stays within one point of the raw one. The gap is not explained by length. Calibrated answers are longer on average (AlpacaEval 431 vs 319 tokens, Arena-Hard 702 vs 500) and in 81% and 85% of prompts, but the win rate does not rise with the length difference:
+
+| Calibrated answer vs baseline | AlpacaEval prompts | AlpacaEval win rate | Arena-Hard prompts | Arena-Hard win rate |
 |---|---:|---:|---:|---:|
-| calibrated vs fixed γ = 2 | 98 / 16 / 14 | 82.8% (76.6%–88.3%) | 83.1% (76.8%–89.1%) | 88.3% |
+| more than 25% longer | 475 | 79.5% | 314 | 87.3% |
+| within 25% | 264 | 86.6% | 157 | 89.8% |
+| more than 25% shorter | 65 | 86.2% | 29 | 86.2% |
 
-The judge chose slot A 53.5% of the time. The length-controlled (LC) win rate follows AlpacaEval 2: a logistic model $\mathrm{logit}\,P(\text{win})=a+b\tanh(\Delta/\mathrm{sd}\,\Delta)$ of the per-prompt score (1, 0.5, 0) on the difference $\Delta$ in answer length (characters) is fitted, and the LC win rate is $\sigma(a)$, the win rate with the length term set to zero (`research/lc_winrate.py`; AlpacaEval's instruction-difficulty term needs many models and is left out, so the number is not comparable with the leaderboard). The fitted length coefficient is $b=-0.06$, and the LC win rate is essentially the raw one. The gap is not explained by length. Calibrated answers are longer on average (415 vs 314 tokens) and in 77% of prompts, but the win rate does not rise with the length difference:
+A linear fit of the score on the log length ratio gives 0.84 at equal length with slope −0.06 on AlpacaEval, and 0.88 with slope +0.01 on Arena-Hard.
 
-| Calibrated answer vs baseline | Prompts | Win rate |
-|---|---:|---:|
-| more than 25% longer | 70 | 82.1% |
-| within 25% | 51 | 81.4% |
-| more than 25% shorter | 7 | 100% |
+Against the GPT-4 reference answers on AlpacaEval both policies lose almost every prompt (only 13 prompts give either policy any credit), so this comparison is at its floor and does not separate them; a 0.6B model is far from GPT-4 under this judge.
 
-A linear fit of the score on the log length ratio gives 0.83 at equal length with slope −0.02. On preference pairs the calibrated margin ties the tuned fixed margin; on generation the judge clearly prefers it. This is one seed and 128 prompts.
+Gemma-2B-it is a weaker external model (its LC win rate against GPT-4 Turbo on the official AlpacaEval 2 leaderboard is 5.4%). Both 0.6B policies still lose to it, but the calibrated policy wins two to three times as often as the fixed margin. Its LC interval on Arena-Hard is wide because its answers are about twice as long as Gemma's (3,311 vs 1,603 characters) and the length differences are widely spread; the point estimate barely moves.
+
+### Analysis
+
+![Reward margin against length difference, and average log-probability against response length](figures/png/simpo/simpo_fig2_length.png)
+
+*Drawn after Figure 2 of the SimPO paper, on the test pairs and only on responses that were not truncated by the 384-token limit: 966 pairs in (a), 2,418 responses in (b) and (c). (a) Mean reward gap by the length difference $|y^w|-|y^l|$, with 95% intervals. (b, c) Average per-token log-probability against response length.*
+
+Before training the reward gap tracks length: it is negative when $y^w$ is the shorter answer, and the average log-probability of a response has Spearman correlation 0.34 with its length. After training this dependence is gone (ρ = 0.06 for fixed γ = 2 and 0.07 for the calibrated margin), and both trained policies keep a positive mean margin when $y^w$ is shorter.
+
+| AlpacaEval (804 prompts) | Arena-Hard (500 prompts) |
+|---|---|
+| ![Per-prompt outcomes against Gemma-2B-it on AlpacaEval](figures/png/simpo/simpo_fig7_heatmap.png) | ![Per-prompt outcomes against Gemma-2B-it on Arena-Hard](figures/png/simpo/simpo_fig8_heatmap.png) |
+
+*Drawn after Figure 7 of the SimPO paper: per-prompt outcomes of the two policies (A) against the same baseline B = Gemma-2B-it; A ≥ B means the judge gives A at least a tie.*
+
+When only one of the two policies matches or beats Gemma-2B-it on a prompt, it is almost always the calibrated one: 136 against 18 prompts on AlpacaEval and 139 against 10 on Arena-Hard (exact McNemar p ≈ 1e-23 and 3e-30).
+
+On preference pairs the calibrated margin ties the tuned fixed margin; on generation the judge clearly prefers it on both prompt sets, head to head and against the same external model. This is one seed and one judge.
 
 ## Repository layout
 
@@ -264,13 +308,14 @@ Local LoRA adapters are grouped under `models/`. Load the reported batch-calibra
 | `adaptive_simpo/modeling.py` | Prompt templating, truncation, length-normalised answer log-probabilities (answer positions only, chunked through `lm_head`), model/adapter loading |
 | `prepare_data.py` | Builds the train/dev/test JSONL subsets from the official Parquet splits |
 | `train.py` | Trains one variant; writes LoRA weights, `metrics.jsonl` (per step), `margin_stats.json`, `training_args.json` |
-| `score_pairs.py` | Scores adapters and the base model on dev or test pairs; writes `<split>_scores.{json,csv}`, and `selection.json` for dev |
+| `score_pairs.py` | Scores adapters and the base model on the two parts of the test set (`--split dev`, `--split test`) or on the training pairs (`--split train`); writes `<split>_scores.{json,csv}`, and `selection.json` for `dev` |
 | `generate.py` | Samples answers for several adapters on the same prompts; caches each prompt group |
 | `summarize.py` | Collects everything into `RUN/results.md`: training and dev table, paired test comparisons against the baseline, and the GPT-judge win rates |
 | `run_experiment.ps1` | Runs the whole pipeline end to end; the judging step calls `research/llm_judge.py` (GPT-6.2-Sol, medium) for every non-fixed variant against the dev-selected baseline |
-| `research/` | `merge_runs.py` (combines run directories, optionally keeping only selected adapters), `llm_judge.py` (blind two-order judging with a GPT model through the Codex CLI), `lc_winrate.py` (length-controlled win rate of a judged comparison), `add_reference.py` (adds the AlpacaEval reference answers to a generation directory as one more policy) |
+| `research/` | `merge_runs.py` (combines run directories, optionally keeping only selected adapters), `llm_judge.py` (blind two-order judging with a GPT model through the Codex CLI), `lc_winrate.py` (length-controlled win rate of a judged comparison), `add_reference.py` (adds the AlpacaEval reference answers, or another model's AlpacaEval outputs, to a generation directory as one more policy), `devtest_scores.py` (accuracy on the 1,986 test pairs and paired comparisons with a baseline, from the scores of the two parts), `response_logps.py` (per-response average log-probabilities and answer lengths on the test pairs, for the analysis figures) |
+| `figures/png/simpo/` | The four figures above, drawn after Figures 2, 3 and 7 of the SimPO paper |
 | `tests/` | Unit tests for the margin formulas and gradients, baseline selection, and a CPU end-to-end smoke test with a tiny random Qwen3 |
-| `data/` | Training, development and test pairs, official UltraFeedback splits, AlpacaEval instructions (see Data) |
+| `data/` | Training and test pairs, official UltraFeedback splits, AlpacaEval instructions (see Data) |
 | `models/`, `papers/`, `.venv/`, `outputs/` | Local only (git-ignored): the Qwen3-0.6B checkpoint and the trained adapters, the SimPO paper, the Python environment, experiment outputs |
 
 ## References

@@ -15,21 +15,35 @@ data/ultrafeedback_binarized/
 data/uf_train4096.jsonl
 data/uf_dev500.jsonl
 data/uf_test1486.jsonl
+data/uf_devtest1986.jsonl
 # Arena-Hard v0.1 questions, downloaded from github.com/lm-sys/arena-hard-auto
 data/arena-hard-v0.1/
+# Public model outputs downloaded from tatsu-lab/alpaca_eval
+data/alpaca_eval_results/
 
 # HTML renderings of the Markdown files (python render_docs.py)
 *.html
 
 # Figures: the generated page and the scripts that build it are local only
 figures/*
-!figures/png/
 research/*figure*
+# ...except the four figures README embeds
+!figures/png/
+figures/png/*
+!figures/png/simpo/
+figures/png/simpo/*
+!figures/png/simpo/simpo_fig2_length.png
+!figures/png/simpo/simpo_fig3_margin.png
+!figures/png/simpo/simpo_fig7_heatmap.png
+!figures/png/simpo/simpo_fig8_heatmap.png
 
 # Local-only notes and tooling
 AGENTS.md
 render_docs.py
 discussion.txt
+
+# Course reports and slides (final paper, presentations), local only
+presentations/
 
 # Editor and OS files
 .Rhistory

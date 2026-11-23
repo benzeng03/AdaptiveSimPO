@@ -7,6 +7,9 @@ research/llm_judge.py can compare any policy with the reference. Token counts us
 tokenizer, for comparability with the generated answers.
 
     python research/add_reference.py outputs/run/generations-ae128-seed42-g16 --group 16
+
+Any AlpacaEval model_outputs.json (same 805 prompts in the same order) works as --eval-data, e.g.
+    --eval-data data/alpaca_eval_results/gemma-2b-it/model_outputs.json --name gemma-2b-it
 """
 import argparse
 import json
@@ -32,9 +35,13 @@ def main(argv=None):
         existing = sorted(a.gen.glob(f"{g:03d}-*.json"))
         if not existing:
             raise SystemExit(f"no generation group {g:03d} in {a.gen}; is --group right?")
-        ids = [r["id"] for r in json.loads(existing[0].read_text(encoding="utf-8"))]
+        rows = json.loads(existing[0].read_text(encoding="utf-8"))
+        ids = [r["id"] for r in rows]
         if ids != indices[g:g + a.group]:
             raise SystemExit(f"group {g:03d} does not match prompts.json; is --group right?")
+        for r in rows:
+            if data[r["id"]]["instruction"] != r["instruction"]:
+                raise SystemExit(f"prompt {r['id']}: {a.eval_data} is not in the order of the generated prompts")
         records = []
         for i in ids:
             out = data[i]["output"]
