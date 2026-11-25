@@ -136,7 +136,7 @@ bash cloud/run.sh --no-length-limit \
 
 ```bash
 bash cloud/run.sh --full --no-length-limit --lr "3e-7 1e-6 3e-6 1e-5" \
-  --variants "fixed:0 fixed:0.5 fixed:1 fixed:1.5 fixed:2 fixed:2.5 calibrated" \
+  --variants "fixed:0.5 fixed:1 fixed:1.5 fixed:2 calibrated" \
   --alpaca 805 --arena 500 --shutdown
 ```
 
