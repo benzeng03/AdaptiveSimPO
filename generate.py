@@ -16,7 +16,7 @@ from pathlib import Path
 
 import torch
 
-from adaptive_simpo.modeling import adapter_key, load_policy, read_jsonl
+from adaptive_simpo.modeling import Policies, read_jsonl
 
 HERE = Path(__file__).resolve().parent
 
@@ -92,8 +92,9 @@ def main(argv=None):
     ), indent=2), encoding="utf-8")
 
     tok = AutoTokenizer.from_pretrained(args.model, padding_side="left")
-    model = load_policy(args.model, adapters, args.device, bf16=True)
-    eos = model.generation_config.eos_token_id
+    # every full model stays loaded (a few are compared at a time; LoRA adapters share the base)
+    policies = Policies(args.model, adapters, args.device, bf16=True, keep_full=len(adapters))
+    eos = policies.shared.generation_config.eos_token_id
     eos = set(eos if isinstance(eos, list) else [eos])
     total, done, new = len(indices) * len(names), 0, 0
     for g in range(0, len(indices), args.group):
@@ -115,12 +116,7 @@ def main(argv=None):
             torch.manual_seed(args.seed + g)
             gen_kwargs = dict(do_sample=True, temperature=args.temperature, top_p=args.top_p, top_k=0,
                               max_new_tokens=args.max_new_tokens, pad_token_id=tok.pad_token_id)
-            if name == "base" and adapters:
-                with model.disable_adapter():
-                    seq = model.generate(**batch, **gen_kwargs)
-            else:
-                if adapters:
-                    model.set_adapter(adapter_key(name))
+            with policies.use(name) as model:
                 seq = model.generate(**batch, **gen_kwargs)
             records = []
             for i, tail in zip(chosen, seq[:, batch.input_ids.size(1):].tolist()):

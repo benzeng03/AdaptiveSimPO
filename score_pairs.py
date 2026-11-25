@@ -16,7 +16,7 @@ from pathlib import Path
 import torch
 from torch.nn import functional as F
 
-from adaptive_simpo.modeling import adapter_key, batch_logps, is_adapter_dir, load_policy, read_jsonl
+from adaptive_simpo.modeling import Policies, batch_logps, is_policy_dir, read_jsonl
 
 HERE = Path(__file__).resolve().parent
 
@@ -45,7 +45,7 @@ def main(argv=None):
     if not rows:
         p.error(f"empty {args.split} dataset")
     strict = torch.tensor([r.get("score_chosen", 1.0) != r.get("score_rejected", 0.0) for r in rows])
-    dirs = sorted(d for d in args.run.iterdir() if d.is_dir() and is_adapter_dir(d)
+    dirs = sorted(d for d in args.run.iterdir() if d.is_dir() and is_policy_dir(d)
                   and (not args.adapters or d.name in args.adapters))
     if args.adapters and len(dirs) != len(set(args.adapters)):
         p.error(f"missing adapters: {sorted(set(args.adapters) - {d.name for d in dirs})}")
@@ -53,7 +53,7 @@ def main(argv=None):
         p.error(f"no trained adapters under {args.run}")
     cfgs = {d.name: json.loads((d / "training_args.json").read_text(encoding="utf-8")) for d in dirs}
     first = cfgs[dirs[0].name]
-    model = load_policy(first["model"], {d.name: d for d in dirs}, first["device"], first["bf16"])
+    policies = Policies(first["model"], {d.name: d for d in dirs}, first["device"], first["bf16"])
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(first["model"])
     names = ([] if args.no_base else ["base"]) + [d.name for d in dirs]
@@ -61,19 +61,11 @@ def main(argv=None):
     for name in names:
         cfg = first if name == "base" else cfgs[name]
         gaps = []
-        ctx = model.disable_adapter() if name == "base" else None
-        if ctx is None:
-            model.set_adapter(adapter_key(name))
-        else:
-            ctx.__enter__()
-        try:
+        with policies.use(name) as model:
             for i in range(0, len(rows), args.batch_size):
                 c, r = batch_logps(model, rows[i:i + args.batch_size], tok, cfg["max_length"],
                                    cfg["max_prompt"], cfg["device"], cfg.get("chat_prompt", True))
                 gaps.append((cfg["beta"] * (c.float() - r.float())).cpu())
-        finally:
-            if ctx is not None:
-                ctx.__exit__(None, None, None)
         gap = torch.cat(gaps)
         kind = "base" if name == "base" else "dpo" if cfg.get("loss") == "dpo" else cfg["margin"]
         res = dict(adapter=name, margin=kind,

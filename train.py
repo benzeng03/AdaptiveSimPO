@@ -23,6 +23,7 @@ from torch.utils.data import DataLoader
 
 from adaptive_simpo.margins import KINDS, MarginConfig, dpo_loss, simpo_loss
 from adaptive_simpo.modeling import batch_logps, read_jsonl
+from adaptive_simpo.optim import MasterAdamW, make_optimizer
 
 HERE = Path(__file__).resolve().parent
 
@@ -46,10 +47,15 @@ def build_parser():
     p.add_argument("--max-length", type=int, default=384)
     p.add_argument("--max-prompt", type=int, default=192)
     p.add_argument("--no-chat-prompt", dest="chat_prompt", action="store_false")
-    p.add_argument("--lora", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--lora", action=argparse.BooleanOptionalAction, default=True,
+                   help="--no-lora trains every weight (full fine-tuning)")
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--bf16", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--fp32-master", choices=("auto", "gpu", "cpu", "off"), default="auto",
+                   help="AdamW on fp32 copies of bf16 weights (auto: whenever a trainable weight is "
+                        "below fp32, i.e. full fine-tuning in bf16; cpu: keep the copies and moments "
+                        "in CPU memory)")
     p.add_argument("--max-steps", type=int, default=0, help="stop early (smoke tests)")
     p.add_argument("--checkpoint-every", type=int, default=32,
                    help="save a resumable checkpoint every N steps (at optimiser updates); 0 = never")
@@ -73,8 +79,9 @@ def save_checkpoint(output, model, optimizer, scheduler, state):
     tmp, final, old = output / "checkpoint.tmp", output / "checkpoint", output / "checkpoint.old"
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir()
-    torch.save({n: p.detach().cpu() for n, p in model.named_parameters() if p.requires_grad},
-               tmp / "trainable.pt")
+    if not isinstance(optimizer, MasterAdamW):  # with fp32 masters the weights are in the optimiser
+        torch.save({n: p.detach().cpu() for n, p in model.named_parameters() if p.requires_grad},
+                   tmp / "trainable.pt")
     torch.save(optimizer.state_dict(), tmp / "optimizer.pt")
     if scheduler is not None:
         torch.save(scheduler.state_dict(), tmp / "scheduler.pt")
@@ -94,13 +101,14 @@ def find_checkpoint(output):
 
 
 def load_checkpoint(ckpt, model, optimizer, scheduler):
-    trainable = torch.load(ckpt / "trainable.pt", map_location="cpu")
-    params = {n: p for n, p in model.named_parameters() if p.requires_grad}
-    if set(trainable) != set(params):
-        raise SystemExit(f"checkpoint {ckpt} does not match the model's trainable parameters")
-    with torch.no_grad():
-        for name, value in trainable.items():
-            params[name].copy_(value)
+    if (ckpt / "trainable.pt").exists():
+        trainable = torch.load(ckpt / "trainable.pt", map_location="cpu")
+        params = {n: p for n, p in model.named_parameters() if p.requires_grad}
+        if set(trainable) != set(params):
+            raise SystemExit(f"checkpoint {ckpt} does not match the model's trainable parameters")
+        with torch.no_grad():
+            for name, value in trainable.items():
+                params[name].copy_(value)
     optimizer.load_state_dict(torch.load(ckpt / "optimizer.pt", map_location="cpu"))
     if scheduler is not None:
         scheduler.load_state_dict(torch.load(ckpt / "scheduler.pt", map_location="cpu"))
@@ -158,15 +166,17 @@ def main(argv=None):
             model.enable_input_require_grads()
     model.train()
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.0)
+    optimizer = make_optimizer(params, args.lr, args.fp32_master)
     updates = math.ceil(len(loader) / args.accumulate) * args.epochs
     scheduler = None
     if args.schedule == "cosine":
         from transformers import get_cosine_schedule_with_warmup
-        scheduler = get_cosine_schedule_with_warmup(optimizer, math.ceil(0.1 * updates), updates)
+        scheduler = get_cosine_schedule_with_warmup(getattr(optimizer, "inner", optimizer),
+                                                    math.ceil(0.1 * updates), updates)
 
-    print(f"[train] {variant}: {len(rows)} pairs, {len(loader)} batches/epoch, {updates} updates",
-          flush=True)
+    print(f"[train] {variant}: {len(rows)} pairs, {len(loader)} batches/epoch, {updates} updates, "
+          f"{'LoRA' if args.lora else 'full'} ({sum(p.numel() for p in params):,} trainable), "
+          f"{type(optimizer).__name__}{' on CPU' if args.fp32_master == 'cpu' else ''}", flush=True)
     totals = dict(gamma=0.0, active=0.0, n=0, steps=0, share=0.0, weight=0.0, k=0.0)
     step, start, elapsed = 0, time.time(), 0.0
     next_batch = (0, 0)  # (epoch, index) of the first batch still to train on
@@ -226,9 +236,11 @@ def main(argv=None):
                                   for k, v in record.items()}), flush=True)
                 if updated and args.checkpoint_every and step % args.checkpoint_every == 0:
                     following = (epoch, index + 1) if index + 1 < len(loader) else (epoch + 1, 0)
+                    saving = time.time()
                     save_checkpoint(output, model, optimizer, scheduler, dict(
                         step=step, next_batch=following, totals=totals,
                         seconds=elapsed + time.time() - start, args=vars(args)))
+                    print(f"[train] checkpoint at step {step} ({time.time() - saving:.1f} s)", flush=True)
                 if args.max_steps and step >= args.max_steps:
                     done = True
                     break

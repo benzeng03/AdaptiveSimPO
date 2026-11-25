@@ -12,6 +12,7 @@ baseline (bootstrap CI + exact McNemar, as in summarize.py).
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -65,8 +66,12 @@ def main(argv=None):
         if name != a.baseline:
             res["vs_baseline"] = paired(g, base)
         results.append(res)
+    def gamma(name):  # fixed-g2 or fixed-g2-lr1e-05
+        m = re.match(r"fixed-g([0-9.]+)", name)
+        return float(m.group(1)) if m else 0.0
+
     order = lambda r: (r["adapter"] != "base", not r["adapter"].startswith("fixed-g"),
-                       float(r["adapter"][7:]) if r["adapter"].startswith("fixed-g") else 0.0, r["adapter"])
+                       gamma(r["adapter"]), r["adapter"])
     results.sort(key=order)
     a.out.write_text(json.dumps(dict(baseline=a.baseline, data="dev500 + test1486", results=results), indent=2),
                      encoding="utf-8")

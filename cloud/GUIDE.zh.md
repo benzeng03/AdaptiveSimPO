@@ -132,6 +132,14 @@ bash cloud/run.sh --no-length-limit \
   --alpaca 805 --arena 500 --shutdown
 ```
 
+全参数微调加学习率网格（见文末说明）：
+
+```bash
+bash cloud/run.sh --full --no-length-limit --lr "3e-7 1e-6 3e-6 1e-5" \
+  --variants "fixed:0 fixed:0.5 fixed:1 fixed:1.5 fixed:2 fixed:2.5 calibrated" \
+  --alpaca 805 --arena 500 --shutdown
+```
+
 `run.sh` 依次做这些事：
 
 1. 逐个训练变体，已训练完的会跳过。
@@ -177,7 +185,7 @@ bash cloud/run.sh --run-dir outputs/<run> <和原来相同的参数>
 ## 8. 下载结果（本机）
 
 ```powershell
-gcloud compute scp simpo-l4:~/AdaptiveSimPO/outputs/<run>.tar.gz outputs/ --zone us-central1-a
+gcloud compute scp <用户名>@simpo-l4:AdaptiveSimPO/outputs/<run>.tar.gz outputs/ --zone us-central1-a
 ```
 
 ```powershell
@@ -187,6 +195,8 @@ tar -xzf outputs/<run>.tar.gz -C outputs
 偏好对的结果已经在 `outputs/<run>/results.md` 和 `devtest1986_scores.json` 里。
 
 adapter 的 `training_args.json` 里记的是云主机上的路径，所以不要在本机对这些 adapter 重新运行 `score_pairs.py`。打分已经在云上做完了。
+
+`<用户名>` 是浏览器 SSH 登录时用的那个 Linux 用户（代码在它的家目录下）；不写的话，gcloud 会用本机的 Windows 用户名登录，找不到文件。Windows 上远程路径不要写 `~`。
 
 ## 9. GPT 判定（本机）
 
@@ -216,7 +226,10 @@ Arena-Hard 同理，把目录换成 `generations-ah500-seed42-g16`。
 
 ### 说明
 
-- 脚本目前只支持 **LoRA**。全参数微调还不能直接用，原因有两个：
-  - 现在的权重和 Adam 状态都是纯 bf16，小学习率的更新会被舍入掉。
-  - `score_pairs.py` 和 `generate.py` 只会读取 LoRA adapter。
+- **全参数微调**：`run.sh` 加 `--full`（训练时传 `--no-lora`）。
+  - 模型权重仍是 bf16，但 AdamW 更新的是 fp32 主权重，所以 3e-7 这样的小学习率不会被舍入掉。
+  - 主权重和 Adam 状态默认放在 CPU 内存里（`--fp32-master cpu`，约 7 GB 内存）。在 L4 上不限长度时，GPU 显存峰值约 13.8 GB，每步只比放在 GPU 上慢约 1 秒；放在 GPU 上（`--fp32-master gpu`）时峰值 20.8 GB，太紧。
+  - checkpoint 约 7 GB，每次保存约 23 秒。
+  - 每个训练好的模型约 1.1 GB，留在云主机上，打包时不包含。偏好对打分和生成都在云上做完了，所以本机只需要那个小压缩包。
+- **学习率网格**：`--lr "3e-7 1e-6 3e-6 1e-5"` 让每个变体在每个学习率下各训一次，名字带后缀，比如 `fixed-g2-lr1e-06`。基线取 1986 对上最好的 fixed（γ 和学习率一起选），calibrated 也取 1986 对上最好的那个学习率，生成只用这两个。
 - 改了长度设置以后，fixed γ 基线必须在同一台机器、同样的长度下重训，才能和 calibrated 比较。上面的正式实验命令已经包含了整个网格。

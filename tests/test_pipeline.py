@@ -163,6 +163,78 @@ class PipelineSmokeTest(unittest.TestCase):
             train.main(common + ["--output", str(early), "--resume", "--max-steps", "1"])
             self.assertEqual(json.loads((early / "margin_stats.json").read_text())["steps"], 1)
 
+    def test_full_finetune(self):
+        """--no-lora in bf16: fp32 masters, resume, then scoring and generation with full models."""
+        from unittest import mock
+
+        from safetensors.torch import load_file
+        from transformers import AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
+
+        import generate
+        import score_pairs
+        import train
+        from adaptive_simpo.modeling import is_adapter_dir, is_full_dir
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            tok = AutoTokenizer.from_pretrained(TOKENIZER)
+            cfg = Qwen3Config(vocab_size=len(tok), hidden_size=32, intermediate_size=64,
+                              num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=1,
+                              head_dim=16, max_position_embeddings=512, tie_word_embeddings=True)
+            torch.manual_seed(0)
+            model_dir = tmp / "tiny"
+            Qwen3ForCausalLM(cfg).save_pretrained(model_dir)
+            tok.save_pretrained(model_dir)
+            data = (ROOT / "data/uf_original_train.jsonl").read_text(encoding="utf-8").splitlines()[:16]
+            train_file = tmp / "train.jsonl"
+            train_file.write_text("\n".join(data), encoding="utf-8")
+            common = ["--model", str(model_dir), "--data", str(train_file), "--device", "cpu",
+                      "--no-gradient-checkpointing", "--batch-size", "4", "--max-length", "96",
+                      "--max-prompt", "48", "--lr", "1e-3", "--margin", "fixed", "--gamma", "1",
+                      "--checkpoint-every", "2"]
+            run = tmp / "run"
+            train.main(common + ["--no-lora", "--output", str(run / "full")])
+            self.assertTrue(is_full_dir(run / "full"))
+            self.assertFalse(is_adapter_dir(run / "full"))
+            trained = load_file(run / "full" / "model.safetensors")
+            base = load_file(model_dir / "model.safetensors")
+            self.assertTrue(any(not torch.equal(trained[k].float(), base[k].float()) for k in base))
+
+            calls = {"n": 0}
+            real = train.batch_logps
+
+            def dies_at_step_4(*a, **k):
+                calls["n"] += 1
+                if calls["n"] == 4:
+                    raise KeyboardInterrupt
+                return real(*a, **k)
+
+            cut = tmp / "cut"
+            with mock.patch.object(train, "batch_logps", dies_at_step_4), self.assertRaises(KeyboardInterrupt):
+                train.main(common + ["--no-lora", "--output", str(cut)])
+            ckpt = sorted(p.name for p in (cut / "checkpoint").iterdir())
+            self.assertEqual(ckpt, ["optimizer.pt", "state.json"])  # the weights are the fp32 masters
+            train.main(common + ["--no-lora", "--output", str(cut), "--resume"])
+            resumed = load_file(cut / "model.safetensors")
+            for name, value in trained.items():
+                torch.testing.assert_close(resumed[name], value)
+
+            # a run directory mixing a full model and a LoRA adapter
+            train.main(common + ["--output", str(run / "lora")])
+            dev = tmp / "dev.jsonl"
+            dev.write_text("\n".join(data[:4]), encoding="utf-8")
+            score_pairs.main([str(run), "--split", "test", "--data", str(dev), "--batch-size", "2"])
+            scores = {s["adapter"]: s for s in json.loads((run / "test_scores.json").read_text())}
+            self.assertEqual(sorted(scores), ["base", "full", "lora"])
+            self.assertNotEqual(scores["full"]["gaps"], scores["base"]["gaps"])
+
+            gen = tmp / "gen"
+            generate.main(["--model", str(model_dir), "--output", str(gen), "--device", "cpu", "--base",
+                           "--adapter", f"full={run / 'full'}", "--adapter", f"lora={run / 'lora'}",
+                           "--num-prompts", "2", "--group", "2", "--max-new-tokens", "4"])
+            self.assertEqual(sorted(p.name for p in gen.glob("*-*.json")),
+                             ["000-base.json", "000-full.json", "000-lora.json"])
+
 
 if __name__ == "__main__":
     unittest.main()

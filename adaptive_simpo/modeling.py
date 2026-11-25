@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
@@ -124,3 +125,65 @@ def load_policy(base, adapters=None, device="cuda", bf16=True):
 def is_adapter_dir(path: Path) -> bool:
     return all((Path(path) / f).is_file() for f in
                ("adapter_model.safetensors", "adapter_config.json", "training_args.json"))
+
+
+def is_full_dir(path: Path) -> bool:
+    """A fully fine-tuned model saved by train.py --no-lora."""
+    path = Path(path)
+    return ((path / "config.json").is_file() and (path / "training_args.json").is_file()
+            and not (path / "adapter_config.json").exists()
+            and any(path.glob("model*.safetensors")))
+
+
+def is_policy_dir(path: Path) -> bool:
+    return is_adapter_dir(path) or is_full_dir(path)
+
+
+class Policies:
+    """The base model, LoRA adapters and fully fine-tuned models behind one interface.
+
+    LoRA adapters share one copy of the base model. Each full model is a separate copy, loaded
+    on first use; at most keep_full of them stay in memory (the least recently used is freed).
+
+        policies = Policies(base, {"fixed-g2": path, ...}, "cuda")
+        with policies.use("fixed-g2") as model: ...
+    """
+
+    def __init__(self, base, dirs, device="cuda", bf16=True, keep_full=1):
+        self.device, self.keep_full = device, max(1, keep_full)
+        self.dtype = torch.bfloat16 if bf16 else torch.float32
+        self.lora = {n: Path(p) for n, p in dirs.items() if is_adapter_dir(p)}
+        self.full = {n: Path(p) for n, p in dirs.items() if n not in self.lora}
+        bad = [n for n, p in self.full.items() if not is_full_dir(p)]
+        if bad:
+            raise SystemExit(f"not a LoRA adapter or full model directory: {bad}")
+        self.shared = load_policy(base, self.lora, device, bf16)
+        self.loaded = {}  # name -> full model, least recently used first
+
+    def __contains__(self, name):
+        return name == "base" or name in self.lora or name in self.full
+
+    def _full(self, name):
+        model = self.loaded.pop(name, None)
+        if model is None:
+            while len(self.loaded) >= self.keep_full:
+                del self.loaded[next(iter(self.loaded))]
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            from transformers import AutoModelForCausalLM
+            model = AutoModelForCausalLM.from_pretrained(self.full[name], dtype=self.dtype).to(self.device).eval()
+        self.loaded[name] = model
+        return model
+
+    @contextmanager
+    def use(self, name):
+        if name == "base" and self.lora:
+            with self.shared.disable_adapter():
+                yield self.shared
+        elif name == "base":
+            yield self.shared
+        elif name in self.lora:
+            self.shared.set_adapter(adapter_key(name))
+            yield self.shared
+        else:
+            yield self._full(name)
