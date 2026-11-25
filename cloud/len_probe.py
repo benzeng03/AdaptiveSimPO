@@ -8,7 +8,7 @@ so nothing is trained.
     .venv/bin/python cloud/len_probe.py                  # LoRA, no length limit
     .venv/bin/python cloud/len_probe.py --mode full                  # fp32 master weights on the GPU
     .venv/bin/python cloud/len_probe.py --mode full --fp32-master cpu
-    .venv/bin/python cloud/len_probe.py --max-length 1024 --max-prompt 512
+    .venv/bin/python cloud/len_probe.py --max-length 1024 --max-prompt 512 --truncation simpo --widths 448 800 1024
 """
 import argparse
 import bisect
@@ -22,7 +22,7 @@ import torch
 HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
 from adaptive_simpo.margins import MarginConfig, simpo_loss  # noqa: E402
-from adaptive_simpo.modeling import batch_logps, prompt_ids  # noqa: E402
+from adaptive_simpo.modeling import TRUNCATIONS, batch_logps, encode_pair  # noqa: E402
 from adaptive_simpo.optim import make_optimizer  # noqa: E402
 
 
@@ -33,6 +33,7 @@ def main():
     p.add_argument("--data", default=str(HERE / "data/uf_train4096.jsonl"))
     p.add_argument("--max-length", type=int, default=8192)
     p.add_argument("--max-prompt", type=int, default=4096)
+    p.add_argument("--truncation", choices=TRUNCATIONS, default="always")
     p.add_argument("--widths", type=int, nargs="+", default=[448, 1108, 1624, 2234, 2507])
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--fp32-master", choices=("auto", "gpu", "cpu", "off"), default="auto",
@@ -45,10 +46,8 @@ def main():
     tok = AutoTokenizer.from_pretrained(a.model)
     rows = [json.loads(line) for line in open(a.data, encoding="utf-8")]
 
-    def width(r):  # sequence length after truncation (longer of the two answers, + EOS)
-        prompt = min(len(prompt_ids(tok, r["prompt"], True)), a.max_prompt)
-        answer = max(len(tok.encode(r[k], add_special_tokens=False)) + 1 for k in ("chosen", "rejected"))
-        return min(prompt + answer, a.max_length)
+    def width(r):  # longer of the two sequences after truncation
+        return max(len(ids) for ids, _ in encode_pair(r, tok, a.max_length, a.max_prompt, True, a.truncation))
 
     order = sorted(rows, key=width)
     lengths = [width(r) for r in order]
@@ -80,7 +79,7 @@ def main():
         torch.cuda.synchronize()
         t = time.time()
         try:
-            c, r = batch_logps(model, batch, tok, a.max_length, a.max_prompt, "cuda", True)
+            c, r = batch_logps(model, batch, tok, a.max_length, a.max_prompt, "cuda", True, truncation=a.truncation)
             loss, *_ = simpo_loss(c, r, 2.0, cfg)
             loss.backward()
             opt.step()

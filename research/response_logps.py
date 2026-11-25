@@ -47,7 +47,8 @@ def main(argv=None):
     tok = AutoTokenizer.from_pretrained(first["model"])
     model = load_policy(first["model"], dirs, first["device"], first["bf16"])
 
-    lengths = [[len([t for t in labels if t != -100]) for _, labels in encode_pair(r, tok, first["max_length"], first["max_prompt"])]
+    lengths = [[len([t for t in labels if t != -100]) for _, labels in encode_pair(r, tok, first["max_length"], first["max_prompt"],
+                                                                      truncation=first.get("truncation", "always"))]
                for r in rows]
     out = dict(data=[str(x) for x in a.data], beta=first["beta"], pairs=len(rows),
                chosen_len=[l[0] for l in lengths], rejected_len=[l[1] for l in lengths],
@@ -64,7 +65,8 @@ def main(argv=None):
             with torch.no_grad():
                 for i in range(0, len(rows), a.batch_size):
                     c, r = batch_logps(model, rows[i:i + a.batch_size], tok, first["max_length"], first["max_prompt"],
-                                       first["device"], first.get("chat_prompt", True))
+                                       first["device"], first.get("chat_prompt", True),
+                                       truncation=first.get("truncation", "always"))
                     cs.append(c.float().cpu()); rs.append(r.float().cpu())
         finally:
             if ctx is not None:

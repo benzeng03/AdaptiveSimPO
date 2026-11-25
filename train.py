@@ -22,7 +22,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from adaptive_simpo.margins import KINDS, MarginConfig, dpo_loss, simpo_loss
-from adaptive_simpo.modeling import batch_logps, read_jsonl
+from adaptive_simpo.modeling import TRUNCATIONS, batch_logps, read_jsonl
 from adaptive_simpo.optim import MasterAdamW, make_optimizer
 
 HERE = Path(__file__).resolve().parent
@@ -46,6 +46,9 @@ def build_parser():
                    help="cosine: 10%% warmup, cosine decay, grad-norm clip 1 (SimPO recipe)")
     p.add_argument("--max-length", type=int, default=384)
     p.add_argument("--max-prompt", type=int, default=192)
+    p.add_argument("--truncation", choices=TRUNCATIONS, default="always",
+                   help="always: cut every prompt to --max-prompt; simpo: cut only pairs longer than "
+                        "--max-length, as SimPO/TRL do (see modeling.encode_pair)")
     p.add_argument("--no-chat-prompt", dest="chat_prompt", action="store_false")
     p.add_argument("--lora", action=argparse.BooleanOptionalAction, default=True,
                    help="--no-lora trains every weight (full fine-tuning)")
@@ -203,12 +206,14 @@ def main(argv=None):
                     window = min(len(rows) - index * args.batch_size, args.batch_size * args.accumulate)
                 dpo = args.loss == "dpo"
                 chosen, rejected = batch_logps(model, pairs, tokenizer, args.max_length, args.max_prompt,
-                                               args.device, args.chat_prompt, average=not dpo)
+                                               args.device, args.chat_prompt, average=not dpo,
+                                               truncation=args.truncation)
                 if dpo:
                     with torch.no_grad(), model.disable_adapter():
                         ref_chosen, ref_rejected = batch_logps(model, pairs, tokenizer, args.max_length,
                                                                args.max_prompt, args.device,
-                                                               args.chat_prompt, average=False)
+                                                               args.chat_prompt, average=False,
+                                                               truncation=args.truncation)
                     loss, scores, gamma, stats = dpo_loss(chosen, rejected, ref_chosen, ref_rejected, args.beta)
                 else:
                     loss, scores, gamma, stats = simpo_loss(chosen, rejected, args.beta, cfg)
@@ -234,8 +239,9 @@ def main(argv=None):
                 log.flush()
                 print(json.dumps({k: round(v, 4) if isinstance(v, float) else v
                                   for k, v in record.items()}), flush=True)
-                if updated and args.checkpoint_every and step % args.checkpoint_every == 0:
-                    following = (epoch, index + 1) if index + 1 < len(loader) else (epoch + 1, 0)
+                following = (epoch, index + 1) if index + 1 < len(loader) else (epoch + 1, 0)
+                last = following == (args.epochs, 0) or (args.max_steps and step >= args.max_steps)
+                if updated and args.checkpoint_every and step % args.checkpoint_every == 0 and not last:
                     saving = time.time()
                     save_checkpoint(output, model, optimizer, scheduler, dict(
                         step=step, next_batch=following, totals=totals,
@@ -260,8 +266,9 @@ def main(argv=None):
                        weight_share_misranked=totals["share"] / totals["steps"])
         if args.loss == "simpo" and cfg.kind == "calibrated":
             summary.update(calib_k_mean=totals["k"] / totals["steps"])
-    (output / "margin_stats.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    # margin_stats.json last: run.sh treats it as "this variant is finished"
     (output / "training_args.json").write_text(json.dumps(vars(args), indent=2), encoding="utf-8")
+    (output / "margin_stats.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     for name in ("checkpoint", "checkpoint.old", "checkpoint.tmp"):
         shutil.rmtree(output / name, ignore_errors=True)
     print(f"[train] saved {output} | {json.dumps(summary)}", flush=True)

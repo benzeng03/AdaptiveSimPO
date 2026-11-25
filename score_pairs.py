@@ -64,7 +64,8 @@ def main(argv=None):
         with policies.use(name) as model:
             for i in range(0, len(rows), args.batch_size):
                 c, r = batch_logps(model, rows[i:i + args.batch_size], tok, cfg["max_length"],
-                                   cfg["max_prompt"], cfg["device"], cfg.get("chat_prompt", True))
+                                   cfg["max_prompt"], cfg["device"], cfg.get("chat_prompt", True),
+                                   truncation=cfg.get("truncation", "always"))
                 gaps.append((cfg["beta"] * (c.float() - r.float())).cpu())
         gap = torch.cat(gaps)
         kind = "base" if name == "base" else "dpo" if cfg.get("loss") == "dpo" else cfg["margin"]

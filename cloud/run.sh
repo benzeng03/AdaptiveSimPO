@@ -20,6 +20,8 @@
 #   --epochs --batch-size --seed --beta                     [1, 16, 42, 2]
 #   --max-length N --max-prompt N                           [384, 192]
 #   --no-length-limit       same as --max-length 8192 --max-prompt 4096 (longer than every pair)
+#   --truncation MODE       always (cut every prompt to --max-prompt) | simpo (cut only pairs over --max-length, as SimPO)  [always]
+#   --simpo-length          SimPO's Mistral-7B-Base setting: --max-length 1024 --max-prompt 512 --truncation simpo
 #   --alpaca N              AlpacaEval prompts to generate, 0 = none; 805 = full set   [128]
 #   --arena N               Arena-Hard v0.1 prompts, 0 = none; 500 = full set          [0]
 #   --group N --max-new-tokens N                            [16, 4096]
@@ -36,12 +38,12 @@ PY="${PY:-.venv/bin/python}"
 
 VARIANTS="fixed:0 fixed:1 fixed:2 calibrated"
 RUN_DIR=""; LRS=0.0001; EPOCHS=1; BS=16; SEED=42; BETA=2; FULL=0; MASTER=cpu
-MAX_LEN=384; MAX_PROMPT=192
+MAX_LEN=384; MAX_PROMPT=192; TRUNC=always
 ALPACA=128; ARENA=0; GROUP=16; MAX_NEW=4096; BASELINE=""; CKPT_EVERY=32
 SKIP_TRAIN=0; SKIP_GEN=0; SHUTDOWN=0
 TRAIN_DATA=data/uf_train4096.jsonl; DEV_DATA=data/uf_dev500.jsonl; TEST_DATA=data/uf_test1486.jsonl
 
-usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --variants) VARIANTS="$2"; shift ;;
@@ -56,6 +58,8 @@ while [ $# -gt 0 ]; do
     --max-length) MAX_LEN="$2"; shift ;;
     --max-prompt) MAX_PROMPT="$2"; shift ;;
     --no-length-limit) MAX_LEN=8192; MAX_PROMPT=4096 ;;
+    --truncation) TRUNC="$2"; shift ;;
+    --simpo-length) MAX_LEN=1024; MAX_PROMPT=512; TRUNC=simpo ;;
     --alpaca) ALPACA="$2"; shift ;;
     --arena) ARENA="$2"; shift ;;
     --group) GROUP="$2"; shift ;;
@@ -93,7 +97,7 @@ if [ -z "$RUN_DIR" ]; then
   [ "$SKIP_TRAIN" = 0 ] || { echo "--skip-train needs --run-dir" >&2; exit 2; }
   lrtag="lr${lrs[0]}"; [ ${#lrs[@]} -gt 1 ] && lrtag=lrgrid
   mode=""; [ "$FULL" = 1 ] && mode=full-
-  RUN_DIR="outputs/run-${mode}bs$BS-$lrtag-ep$EPOCHS-seed$SEED-L$MAX_LEN-$(date +%Y%m%d-%H%M%S)"
+  RUN_DIR="outputs/run-${mode}bs$BS-$lrtag-ep$EPOCHS-seed$SEED-L$MAX_LEN$([ "$TRUNC" = simpo ] && echo -simpo || true)-$(date +%Y%m%d-%H%M%S)"
 fi
 mkdir -p "$RUN_DIR"
 exec > >(tee -a "$RUN_DIR/run.log") 2>&1
@@ -114,7 +118,7 @@ model_args=""
 [ "$FULL" = 1 ] && model_args="--no-lora --fp32-master $MASTER"
 echo "[run] $(date '+%F %T')  run dir $RUN_DIR"
 echo "[run] ${#names[@]} variants ${names[*]}"
-echo "[run] $([ "$FULL" = 1 ] && echo "full fine-tuning (fp32 masters on $MASTER)" || echo LoRA) | lr ${lrs[*]}, epochs $EPOCHS, batch $BS, seed $SEED, beta $BETA, max length $MAX_LEN, max prompt $MAX_PROMPT"
+echo "[run] $([ "$FULL" = 1 ] && echo "full fine-tuning (fp32 masters on $MASTER)" || echo LoRA) | lr ${lrs[*]}, epochs $EPOCHS, batch $BS, seed $SEED, beta $BETA, max length $MAX_LEN, max prompt $MAX_PROMPT, truncation $TRUNC"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 "$PY" -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; print('[run] torch', torch.__version__, torch.cuda.get_device_name(0))"
 
@@ -127,7 +131,7 @@ if [ "$SKIP_TRAIN" = 0 ]; then
     echo "=== $(date '+%F %T') training $name ($((i + 1))/${#names[@]})"
     # shellcheck disable=SC2086
     "$PY" -u train.py --data "$TRAIN_DATA" --batch-size "$BS" --seed "$SEED" --beta "$BETA" \
-      --epochs "$EPOCHS" --max-length "$MAX_LEN" --max-prompt "$MAX_PROMPT" ${train_args[$i]} $model_args \
+      --epochs "$EPOCHS" --max-length "$MAX_LEN" --max-prompt "$MAX_PROMPT" --truncation "$TRUNC" ${train_args[$i]} $model_args \
       --checkpoint-every "$CKPT_EVERY" --resume ${EXTRA_TRAIN_ARGS:-} --output "$out"
   done
 fi

@@ -32,13 +32,24 @@ def prompt_ids(tokenizer, prompt, chat_prompt=True):
     return list(ids)
 
 
-def encode_pair(row, tokenizer, max_length, max_prompt, chat_prompt=True):
+TRUNCATIONS = ("always", "simpo")
+
+
+def encode_pair(row, tokenizer, max_length, max_prompt, chat_prompt=True, truncation="always"):
     """Return [(ids, labels) for chosen, (ids, labels) for rejected].
 
     Long prompts keep their end; long answers keep their start. EOS is appended
-    to each answer and counts as an answer token when it survives truncation."""
-    prefix = prompt_ids(tokenizer, row["prompt"], chat_prompt)[-max_prompt:]
-    result = []
+    to each answer and counts as an answer token when it survives truncation.
+
+    truncation="always": the prompt is always cut to its last max_prompt tokens, then each
+    answer to max_length - len(prompt).
+    truncation="simpo": the SimPO/TRL rule (keep_end). Nothing is cut unless the prompt plus
+    the longer answer exceeds max_length; then the prompt is cut to its last max_prompt
+    tokens, and if the pair is still too long, both answers are cut to max_length - max_prompt."""
+    if truncation not in TRUNCATIONS:
+        raise ValueError(f"truncation must be one of {TRUNCATIONS}")
+    prefix = prompt_ids(tokenizer, row["prompt"], chat_prompt)
+    answers = []
     for key in ("chosen", "rejected"):
         answer = tokenizer.encode(row[key], add_special_tokens=False)
         if not answer:
@@ -46,9 +57,17 @@ def encode_pair(row, tokenizer, max_length, max_prompt, chat_prompt=True):
         eos = tokenizer.eos_token_id
         if eos is not None and answer[-1] != eos:
             answer.append(eos)
-        answer = answer[:max_length - len(prefix)]
-        result.append((prefix + answer, [-100] * len(prefix) + answer))
-    return result
+        answers.append(answer)
+    if truncation == "always":
+        prefix = prefix[-max_prompt:]
+        answers = [a[:max_length - len(prefix)] for a in answers]
+    else:
+        longer = max(len(a) for a in answers)
+        if len(prefix) + longer > max_length:
+            prefix = prefix[-max_prompt:]
+            if len(prefix) + longer > max_length:
+                answers = [a[:max_length - max_prompt] for a in answers]
+    return [(prefix + a, [-100] * len(prefix) + a) for a in answers]
 
 
 def _chunked_answer_logps(lm, ids, mask, labels, chunk=64, average=True):
@@ -74,10 +93,11 @@ def _chunked_answer_logps(lm, ids, mask, labels, chunk=64, average=True):
     return -totals / targets.ne(-100).sum(1) if average else -totals
 
 
-def batch_logps(model, rows, tokenizer, max_length, max_prompt, device, chat_prompt=True, average=True):
+def batch_logps(model, rows, tokenizer, max_length, max_prompt, device, chat_prompt=True, average=True,
+                truncation="always"):
     """Per-token mean (average=True, SimPO) or summed (average=False, DPO) log-probabilities
     (chosen, rejected) for a list of pairs."""
-    encoded = [encode_pair(r, tokenizer, max_length, max_prompt, chat_prompt) for r in rows]
+    encoded = [encode_pair(r, tokenizer, max_length, max_prompt, chat_prompt, truncation) for r in rows]
     sequences = [pair[i] for i in (0, 1) for pair in encoded]
     width = max(len(ids) for ids, _ in sequences)
     pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
