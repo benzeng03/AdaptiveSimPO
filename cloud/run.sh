@@ -7,6 +7,7 @@
 #   bash cloud/run.sh --variants "fixed:2 calibrated" --no-length-limit --alpaca 805 --arena 500
 #   bash cloud/run.sh --run-dir outputs/run-X --skip-train --alpaca 805   # reuse trained adapters
 #   bash cloud/run.sh ... --shutdown                      # power the VM off at the end
+#   bash cloud/run.sh --run-dir outputs/run-X <same options>   # resume after an interruption
 #
 # Options (defaults = the reported setup):
 #   --variants "SPEC ..."   space-separated fixed:<gamma> | calibrated   ["fixed:0 fixed:1 fixed:2 calibrated"]
@@ -18,6 +19,7 @@
 #   --arena N               Arena-Hard v0.1 prompts, 0 = none; 500 = full set          [0]
 #   --group N --max-new-tokens N                            [16, 4096]
 #   --baseline NAME         fixed variant to generate against [best fixed on dev+test]
+#   --checkpoint-every N    training checkpoint interval in steps (a rerun resumes from it) [32]
 #   --skip-train --skip-gen --shutdown
 #   --train-data --dev-data --test-data FILE                [data/uf_train4096 / uf_dev500 / uf_test1486]
 # Env: PY (interpreter, default .venv/bin/python), EXTRA_TRAIN_ARGS (e.g. "--max-steps 2" for a smoke test).
@@ -28,7 +30,7 @@ PY="${PY:-.venv/bin/python}"
 VARIANTS="fixed:0 fixed:1 fixed:2 calibrated"
 RUN_DIR=""; LR=0.0001; EPOCHS=1; BS=16; SEED=42; BETA=2
 MAX_LEN=384; MAX_PROMPT=192
-ALPACA=128; ARENA=0; GROUP=16; MAX_NEW=4096; BASELINE=""
+ALPACA=128; ARENA=0; GROUP=16; MAX_NEW=4096; BASELINE=""; CKPT_EVERY=32
 SKIP_TRAIN=0; SKIP_GEN=0; SHUTDOWN=0
 TRAIN_DATA=data/uf_train4096.jsonl; DEV_DATA=data/uf_dev500.jsonl; TEST_DATA=data/uf_test1486.jsonl
 
@@ -50,6 +52,7 @@ while [ $# -gt 0 ]; do
     --group) GROUP="$2"; shift ;;
     --max-new-tokens) MAX_NEW="$2"; shift ;;
     --baseline) BASELINE="$2"; shift ;;
+    --checkpoint-every) CKPT_EVERY="$2"; shift ;;
     --skip-train) SKIP_TRAIN=1 ;;
     --skip-gen) SKIP_GEN=1 ;;
     --shutdown) SHUTDOWN=1 ;;
@@ -94,17 +97,17 @@ echo "[run] variants ${names[*]} | lr $LR, epochs $EPOCHS, batch $BS, seed $SEED
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 "$PY" -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; print('[run] torch', torch.__version__, torch.cuda.get_device_name(0))"
 
-# ---- train (variants that already have margin_stats.json are skipped, so a rerun resumes)
+# ---- train. A rerun skips variants that already have margin_stats.json and continues an
+# interrupted one from its last checkpoint (train.py saves one every --checkpoint-every steps).
 if [ "$SKIP_TRAIN" = 0 ]; then
   for i in "${!names[@]}"; do
     name=${names[$i]}; out="$RUN_DIR/$name"
     if [ -f "$out/margin_stats.json" ]; then echo "[run] skip trained $name"; continue; fi
-    rm -rf "$out"
     echo "=== $(date '+%F %T') training $name"
     # shellcheck disable=SC2086
     "$PY" -u train.py --data "$TRAIN_DATA" --batch-size "$BS" --seed "$SEED" --lr "$LR" --beta "$BETA" \
       --epochs "$EPOCHS" --max-length "$MAX_LEN" --max-prompt "$MAX_PROMPT" ${train_args[$i]} \
-      ${EXTRA_TRAIN_ARGS:-} --output "$out"
+      --checkpoint-every "$CKPT_EVERY" --resume ${EXTRA_TRAIN_ARGS:-} --output "$out"
   done
 fi
 

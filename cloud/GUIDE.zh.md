@@ -168,8 +168,11 @@ bash cloud/run.sh --run-dir outputs/<run> <和原来相同的参数>
 
 续跑时：
 - 已训练完的变体会跳过。
-- 正在训练的那个变体会从头再训。
+- 正在训练的那个变体从最近一次 checkpoint 接着训（每 32 步存一次，可用 `--checkpoint-every` 改），日志里会出现 `resuming from checkpoint at step N`。最多重训 31 步：384 长度约 2 分钟，不限长度约 8 分钟。
+- 打分会整个重跑。
 - 已经生成完的组会直接复用。
+
+用 Spot 时，**On VM termination** 一定要选 **Stop**：选 Delete 的话，被回收时磁盘连同 checkpoint 一起删掉。Spot 被回收后不会自动重启，要在 VM 列表里手动点 **Start**，再开 tmux 重跑上面的命令。
 
 ## 8. 下载结果（本机）
 

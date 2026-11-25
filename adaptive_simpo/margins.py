@@ -101,7 +101,7 @@ def simpo_loss(chosen_logps, rejected_logps, beta, cfg: MarginConfig):
     with torch.no_grad():
         w = torch.sigmoid(gamma - scores.detach())
         stats.update(weight_mean=w.mean().item(),
-                     weight_share_misranked=(w * (scores.detach() < 0)).sum().item() / w.sum().item())
+                     weight_share_misranked=(w * (scores.detach() < 0)).sum().item() / max(w.sum().item(), 1e-30))
     loss = F.softplus(gamma.detach() - scores).mean()
     return loss, scores.detach(), gamma.detach(), stats
 
@@ -124,5 +124,5 @@ def dpo_loss(policy_chosen, policy_rejected, ref_chosen, ref_rejected, beta):
     with torch.no_grad():
         w = torch.sigmoid(-scores.detach())
         stats.update(weight_mean=w.mean().item(),
-                     weight_share_misranked=(w * (scores.detach() < 0)).sum().item() / w.sum().item())
+                     weight_share_misranked=(w * (scores.detach() < 0)).sum().item() / max(w.sum().item(), 1e-30))
     return F.softplus(-scores).mean(), scores.detach(), gamma, stats

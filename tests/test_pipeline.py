@@ -88,6 +88,81 @@ class PipelineSmokeTest(unittest.TestCase):
             self.assertEqual(len(first), 2)
             self.assertLessEqual(first[0]["tokens"], 4)
 
+    def test_resume_matches_uninterrupted(self):
+        """Kill training mid-run, resume from the checkpoint, and get the same run as without the kill."""
+        from unittest import mock
+
+        from safetensors.torch import load_file
+        from transformers import AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
+
+        import train
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            tok = AutoTokenizer.from_pretrained(TOKENIZER)
+            cfg = Qwen3Config(vocab_size=len(tok), hidden_size=32, intermediate_size=64,
+                              num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=1,
+                              head_dim=16, max_position_embeddings=512, tie_word_embeddings=True)
+            torch.manual_seed(0)
+            model_dir = tmp / "tiny"
+            Qwen3ForCausalLM(cfg).save_pretrained(model_dir)
+            tok.save_pretrained(model_dir)
+            data = (ROOT / "data/uf_original_train.jsonl").read_text(encoding="utf-8").splitlines()[:16]
+            train_file = tmp / "train.jsonl"
+            train_file.write_text("\n".join(data), encoding="utf-8")
+            # 4 batches x 2 epochs = 8 steps; checkpoints after steps 3 and 6 (the second one
+            # crosses the epoch boundary, so the resumed run must redraw epoch 1's shuffle).
+            common = ["--model", str(model_dir), "--data", str(train_file), "--device", "cpu",
+                      "--no-bf16", "--no-gradient-checkpointing", "--batch-size", "4", "--epochs", "2",
+                      "--max-length", "96", "--max-prompt", "48", "--lr", "1e-3", "--margin", "calibrated",
+                      "--checkpoint-every", "3"]
+            train.main(common + ["--output", str(tmp / "full")])
+
+            calls = {"n": 0}
+            real = train.batch_logps
+
+            def dies_at_step_8(*a, **k):
+                calls["n"] += 1
+                if calls["n"] == 8:
+                    raise KeyboardInterrupt
+                return real(*a, **k)
+
+            cut = tmp / "cut"
+            with mock.patch.object(train, "batch_logps", dies_at_step_8), self.assertRaises(KeyboardInterrupt):
+                train.main(common + ["--output", str(cut)])
+            self.assertTrue((cut / "checkpoint" / "state.json").exists())
+            self.assertEqual(len((cut / "metrics.jsonl").read_text().splitlines()), 7)
+            with self.assertRaises(SystemExit):  # without --resume a non-empty directory is refused
+                train.main(common + ["--output", str(cut)])
+            with self.assertRaises(SystemExit):  # resuming with other settings is refused
+                train.main(common + ["--output", str(cut), "--resume", "--lr", "1e-2"])
+            train.main(common + ["--output", str(cut), "--resume"])
+
+            self.assertFalse((cut / "checkpoint").exists())
+            full_log = [json.loads(l) for l in (tmp / "full" / "metrics.jsonl").read_text().splitlines()]
+            cut_log = [json.loads(l) for l in (cut / "metrics.jsonl").read_text().splitlines()]
+            self.assertEqual([r["step"] for r in cut_log], list(range(1, 9)))
+            for a, b in zip(full_log, cut_log):
+                self.assertAlmostEqual(a["loss"], b["loss"], places=5)
+            full_w = load_file(tmp / "full" / "adapter_model.safetensors")
+            cut_w = load_file(cut / "adapter_model.safetensors")
+            for name, value in full_w.items():
+                torch.testing.assert_close(cut_w[name], value)
+            full_stats = json.loads((tmp / "full" / "margin_stats.json").read_text())
+            cut_stats = json.loads((cut / "margin_stats.json").read_text())
+            for key in ("steps", "pairs_seen", "gamma_mean", "calib_k_mean", "weight_share_misranked"):
+                self.assertAlmostEqual(full_stats[key], cut_stats[key], places=5)
+
+            # Killed before the first checkpoint: --resume starts over in the same directory.
+            early = tmp / "early"
+            calls["n"] = 0
+            with mock.patch.object(train, "batch_logps",
+                                   lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt)), \
+                    self.assertRaises(KeyboardInterrupt):
+                train.main(common + ["--output", str(early)])
+            train.main(common + ["--output", str(early), "--resume", "--max-steps", "1"])
+            self.assertEqual(json.loads((early / "margin_stats.json").read_text())["steps"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
