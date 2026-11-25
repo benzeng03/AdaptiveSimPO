@@ -181,6 +181,30 @@ bash cloud/run.sh --run-dir outputs/<run> <和原来相同的参数>
 
 **On VM termination** 一定要是 **Stop**：选 Delete 的话，被回收时磁盘连同 checkpoint 一起删掉。
 
+### 自动续跑和看门狗
+
+不想手动重启的话，可以让虚拟机开机时自己续跑，再让本机定时检查：
+
+1. **启动脚本**（云主机，每次开机以 root 运行，对每个家目录里有 `~/autoresume.sh` 的用户执行它）。在本机安装：
+
+```powershell
+gcloud compute instances add-metadata simpo-l4 --zone us-central1-a --metadata-from-file startup-script=cloud/startup-script.sh
+```
+
+2. **`~/autoresume.sh` 和 `~/start_full.sh`**（云主机）：把 `cloud/autoresume.example.sh` 复制成 `~/autoresume.sh`，`RUN` 改成你的 run 目录；`~/start_full.sh` 里写正式实验的 `run.sh` 命令，并把第一个参数作为 `--run-dir` 传进去。开机后它会等 GPU 驱动就绪，没有 tmux 会话 `simpo` 就新开一个续跑；结果已经打包（`<run>.tar.gz` 存在）就什么都不做。记录在 `~/autoresume.log`。
+
+3. **看门狗**（本机）：每 5 分钟查一次虚拟机。被回收（Spot preemption）就重新启动；连续 6 次（30 分钟）都因为没货启动不了，就给磁盘做快照，在 `-Zones` 列表里第一个有货的 zone 用快照新建同名虚拟机（带上启动脚本），新机器上确认 tmux 会话起来以后，删掉旧机器和快照。如果虚拟机是正常停下的（`run.sh --shutdown` 跑完，或者你手动点了 Stop），看门狗就退出。
+
+```powershell
+Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','cloud\watchdog.ps1'
+```
+
+```powershell
+Get-Content outputs\watchdog.log -Tail 20
+```
+
+看门狗运行时会阻止 Windows 空闲睡眠（退出后恢复），但合上盖子或手动睡眠还是会睡，电脑睡着时它不工作。只查一次、不做任何操作：`cloud\watchdog.ps1 -Once`。停止：在任务管理器里结束对应的 powershell 进程，或者 `Stop-Process -Id (Get-Content outputs\watchdog.pid)`（如果启动时记下了 PID）。
+
 ### Spot 起不来时换 zone（本机）
 
 点 Start 时报 “currently unavailable” 说明这个 zone 暂时没有 L4。可以过一会儿再试，也可以用磁盘快照在别的 zone 重建（磁盘里的环境、代码和结果都会带过去）：
