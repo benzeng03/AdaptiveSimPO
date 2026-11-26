@@ -51,16 +51,18 @@ function Get-Status([string]$zone) {
 }
 
 function Get-LastEvent([string]$zone) {
-  # newest lifecycle operation on this instance (setMetadata etc. are skipped: gcloud ssh
-  # adds keys that way, which would hide a preemption)
+  # newest successful lifecycle operation on this instance. Skipped: setMetadata etc. (gcloud ssh
+  # adds keys that way) and failed operations (a start refused for lack of capacity), either of
+  # which would otherwise hide the preemption
   $lifecycle = @("compute.instances.preempted", "compute.instances.guestTerminate", "stop", "start",
                  "insert", "reset", "suspend", "resume", "delete")
   $r = Invoke-Gcloud compute operations list --zones $zone --sort-by "~insertTime" --limit 500 `
-        --format "csv[no-heading](operationType,insertTime,targetLink)"
+        --format "csv[no-heading](operationType,insertTime,targetLink,error.errors[0].code)"
   if (-not $r.ok) { return $null }
   foreach ($line in ($r.out -split "`n")) {
     $f = $line.Trim().Split(",")
-    if ($f.Count -ge 3 -and $lifecycle -contains $f[0] -and $f[2] -match "/instances/$([regex]::Escape($Instance))$") {
+    if ($f.Count -ge 3 -and $lifecycle -contains $f[0] -and $f[2] -match "/instances/$([regex]::Escape($Instance))$" `
+        -and ($f.Count -lt 4 -or $f[3] -eq "")) {
       return @{ type = $f[0]; time = $f[1] }
     }
   }
