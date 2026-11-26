@@ -32,11 +32,23 @@ py -3.14 -m venv .venv
 .\.venv\Scripts\python.exe research\llm_judge.py outputs\<run>\generations-ae128-seed42-g16 --variant calibrated --baseline fixed-g2 --model gpt-6.2-sol --effort medium
 ```
 
-Variant specs are `fixed:<γ>` and `calibrated`. With `-SkipEval` no fixed variant is required. With `-EvalOnly` the adapter list is built from `-Variants`, so pass the variants the run directory contains. `-GenerateVariants` restricts generation to the listed non-fixed variants (the dev-selected baseline is always generated), and `-GenerateGroup` (default 16) sets how many prompts share one sampling seed. `-BatchSize`, `-LearningRate` and `-Epochs` set the optimisation budget (defaults 16, 1e-4 and 1) and the run directory name records them; `-TrainData`, `-DevData` and `-TestData` replace the data files. Re-running with an existing `-RunDir` trains only the missing variants and reuses cached generations. `research/merge_runs.py` combines run directories for one evaluation; `--adapters` keeps only the listed adapters, and a run given as `PATH=SUFFIX` has SUFFIX appended to its adapter names. The individual scripts can be run directly; see `--help` on each, for example:
+Variant specs are `fixed:<γ>`, `calibrated`, `calibrated-ema:<β>` (the calibrated margin with `--k-ema β`), `calibrated-logistic` (`--k-family logistic`) and `calibrated-logistic-ema:<β>`; see Implementation. With `-SkipEval` no fixed variant is required. With `-EvalOnly` the adapter list is built from `-Variants`, so pass the variants the run directory contains. `-GenerateVariants` restricts generation to the listed non-fixed variants (the dev-selected baseline is always generated), and `-GenerateGroup` (default 16) sets how many prompts share one sampling seed. `-BatchSize`, `-LearningRate` and `-Epochs` set the optimisation budget (defaults 16, 1e-4 and 1) and the run directory name records them; `-TrainData`, `-DevData` and `-TestData` replace the data files. Re-running with an existing `-RunDir` trains only the missing variants and reuses cached generations. `research/merge_runs.py` combines run directories for one evaluation; `--adapters` keeps only the listed adapters, and a run given as `PATH=SUFFIX` has SUFFIX appended to its adapter names. The individual scripts can be run directly; see `--help` on each, for example:
 
 ```powershell
 .\.venv\Scripts\python.exe train.py --margin calibrated --output outputs\custom\calibrated
 ```
+
+`--reward` chooses the reward gap $r_i$ that the margin acts on; the loss is always $\mathrm{softplus}(\gamma_i-r_i)$ with a fixed or calibrated $\gamma_i$. With $S(y)$ the summed log-probability of an answer, $|y|$ its number of tokens and $S_\mathrm{ref}$ the same under the base model:
+
+| `--reward` | $r_i$ | Default β | Variant name |
+|---|---|---|---|
+| `simpo` (default) | $\beta\left(S(y^w)/\lvert y^w\rvert-S(y^l)/\lvert y^l\rvert\right)$ | 2 | `fixed-g2`, `calibrated` |
+| `dpo` | $\beta\left[(S-S_\mathrm{ref})(y^w)-(S-S_\mathrm{ref})(y^l)\right]$ | 0.1 | `dpo-calibrated` |
+| `dpo-noref` | $\beta\left(S(y^w)-S(y^l)\right)$ | 0.1 | `dpo-noref-calibrated` |
+| `r-dpo` | the DPO gap $+\alpha(\lvert y^w\rvert-\lvert y^l\rvert)$, `--rdpo-alpha` (default 0.05) | 0.1 | `rdpo-a0.05-calibrated` |
+| `orpo` | $\beta\left[\mathrm{lo}(y^w)-\mathrm{lo}(y^l)\right]$, $\mathrm{lo}=m-\log(1-e^m)$, $m=S/\lvert y\rvert$; the loss adds the chosen answer's mean NLL: $\mathrm{NLL}(y^w)+\lambda\cdot$ preference loss, `--orpo-lambda` (default 0.1) | 1 | `orpo-l0.1-calibrated` |
+
+`dpo` and `r-dpo` need LoRA: the reference is the model with the adapter disabled. With a reference every gap is 0 at the first step, so the calibrated $\hat k$ starts at its lower bound until the policy moves (`--k-ema` smooths the start). `score_pairs.py` scores each adapter with its own reward (the base model as reference) and also reports `accuracy_mean_logp`, the accuracy of the length-normalised gap, which is comparable across rewards; the fixed baseline is chosen among SimPO adapters only. These rewards have not been trained or evaluated in the experiments reported here.
 
 Custom data is UTF-8 JSONL with one pair per line: `{"prompt": "...", "chosen": "...", "rejected": "..."}`, optionally with `score_chosen` and `score_rejected`. A string prompt is wrapped as a user message in the chat template; a message list is used as is.
 
@@ -165,6 +177,14 @@ The table crosses the sign of $r$ with its size and compares three rules at the 
 #### Implementation
 
 `--margin calibrated` (variant `calibrated`) sets $\gamma_i=(1-\hat k)r_i$ with $\hat k=2\bar r_B/s_B^2$, the mean and population variance of the current batch's detached gaps, and at least 0.01 (a nonpositive batch mean gives this lower bound). Each step logs $\hat k$ as `calib_k`, and `margin_stats.json` stores its mean over training as `calib_k_mean`.
+
+`--k-ema β` (variant `calibrated-ema<β>`) estimates $\hat k$ from exponential moving averages of the gap moments instead of the current batch alone: $m_t=\beta m_{t-1}+(1-\beta)\bar r_{B_t}$ and $q_t=\beta q_{t-1}+(1-\beta)\overline{r^2}_{B_t}$, one update per micro-batch with the current batch included, bias-corrected as in Adam ($\hat m_t=m_t/(1-\beta^t)$, likewise $\hat q_t$), and $\hat k_t=\max(2\hat m_t/(\hat q_t-\hat m_t^2),0.01)$. $\beta=0$ is the per-batch rule. The averages are saved in resumable checkpoints, and they keep $\hat k$ defined when a micro-batch holds a single pair, where the batch variance is zero. Replaying the logged batch moments of the reported calibrated run with $\beta=0.9$ (a half-life of about 7 steps) gives a mean $\hat k$ of 0.13 instead of 0.23 and a step-to-step spread about five times smaller, and the lower bound is never reached; the ratio $2\bar r_B/s_B^2$ of 16 gaps is biased upwards. No model has been trained with this option yet.
+
+`--k-family logistic` (variant `calibrated-logistic`) replaces the normal reference with a logistic location model $r=\mu+sL$, $L$ standard logistic, fitted to the same two moments: $\mu=\bar r$ and $s=\sqrt{3}\thinspace s_B/\pi$ (from the batch or from the moving averages). Its calibration logit
+
+$$g(r)=\log\frac{f(r)}{f(-r)}=2\log\cosh\frac{r+\mu}{2s}-2\log\cosh\frac{r-\mu}{2s}$$
+
+is odd, rises with slope $(2/s)\tanh(\mu/2s)$ at $r=0$ and saturates at $c=2\mu/s$: however confidently a pair is ranked, it agrees with its label with probability at most $\sigma(c)$. The margin is $\gamma_i=r_i-g(r_i)$, so the weight is $\sigma(-g(r_i))$ and the forward loss $-\log\sigma(g(r_i))$; for small $\mu/s$ the slope at zero is $\pi^2/6\approx1.64$ times the normal $2\mu/s^2$. A nonpositive mean or a slope below 0.01 falls back to the linear rule with $\hat k=0.01$. Each step logs the slope as `calib_k` and the ceiling as `calib_c`. On the 1986 test gaps of the reported models the logistic curve fits the observed agreement rates better than the linear one (a conditional log-likelihood higher by 1 to 10 nats), because the agreement rate levels off at large $|r|$; no model has been trained with this option yet.
 
 ### Advantage: no per-setting γ search
 
@@ -306,7 +326,8 @@ Local LoRA adapters are grouped under `models/`. Load the reported batch-calibra
 
 | Path | Contents |
 |---|---|
-| `adaptive_simpo/margins.py` | Fixed and calibrated margins (`compute_margins`), the calibration slope $2\bar r/s^2$ (`calibration_slope`), SimPO loss with gradient-weight statistics (`simpo_loss`) |
+| `adaptive_simpo/margins.py` | Fixed and calibrated margins (`compute_margins`), the calibration slope $2\bar r/s^2$ (`calibration_slope`) and its moving-average version (`MomentEMA`), the logistic calibration logit (`logistic_logit`), the margin loss on any reward gap with gradient-weight statistics (`margin_loss`, `simpo_loss`) |
+| `adaptive_simpo/rewards.py` | Reward gaps for `--reward`: SimPO, DPO, DPO without reference, R-DPO, ORPO (`reward_gap`) |
 | `adaptive_simpo/modeling.py` | Prompt templating, truncation, length-normalised answer log-probabilities (answer positions only, chunked through `lm_head`), model/adapter loading |
 | `prepare_data.py` | Builds the train/dev/test JSONL subsets from the official Parquet splits |
 | `train.py` | Trains one variant; writes LoRA weights, `metrics.jsonl` (per step), `margin_stats.json`, `training_args.json` |

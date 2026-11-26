@@ -128,6 +128,8 @@ def main(argv=None):
     p.add_argument("--retries", type=int, default=2)
     p.add_argument("--timeout", type=int, default=1800)
     p.add_argument("--limit", type=int, help="judge only the first N prompts (for testing)")
+    p.add_argument("--sample", type=int, help="judge a random subset of N prompts (drawn with --sample-seed)")
+    p.add_argument("--sample-seed", type=int, default=0)
     p.add_argument("--codex", default=None, help="codex executable (default: the installed Codex app)")
     p.add_argument("--seed", type=int, default=0)
     a = p.parse_args(argv)
@@ -138,9 +140,11 @@ def main(argv=None):
     ids = sorted(set(var) & set(base))
     if a.limit:
         ids = ids[:a.limit]
+    if a.sample:
+        ids = sorted(random.Random(a.sample_seed).sample(ids, a.sample))
+    tag = (f"-limit{a.limit}" if a.limit else "") + (f"-sample{a.sample}s{a.sample_seed}" if a.sample else "")
     # One cache per comparison: batch keys (pass1-batch000, ...) are only unique within a comparison.
-    cache = a.gen / (f"llm-judge-{a.model}-{a.effort}-{a.variant}-vs-{a.baseline}"
-                     f"{f'-limit{a.limit}' if a.limit else ''}")
+    cache = a.gen / f"llm-judge-{a.model}-{a.effort}-{a.variant}-vs-{a.baseline}{tag}"
     cache.mkdir(exist_ok=True)
     schema_file = cache / "schema.json"
     schema_file.write_text(json.dumps(SCHEMA), encoding="utf-8")

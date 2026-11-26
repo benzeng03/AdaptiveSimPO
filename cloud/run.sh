@@ -11,7 +11,9 @@
 #   bash cloud/run.sh --run-dir outputs/run-X <same options>   # resume after an interruption
 #
 # Options (defaults = the reported setup):
-#   --variants "SPEC ..."   space-separated fixed:<gamma> | calibrated   ["fixed:0 fixed:1 fixed:2 calibrated"]
+#   --variants "SPEC ..."   space-separated fixed:<gamma> | calibrated[-logistic][-ema:<decay>]   ["fixed:0 fixed:1 fixed:2 calibrated"]
+#                           (calibrated-ema:0.9 = train.py --k-ema 0.9, named calibrated-ema0.9;
+#                            calibrated-logistic = --k-family logistic; calibrated-logistic-ema:0.9 both)
 #   --lr "LR ..."           one or more learning rates; with several, every variant is trained at each
 #                           and named <variant>-lr<LR>, e.g. fixed-g2-lr1e-05            [1e-4]
 #   --full                  full fine-tuning instead of LoRA (fp32 master weights, see train.py)
@@ -108,9 +110,16 @@ for lr in "${lrs[@]}"; do
   for spec in $VARIANTS; do
     case "$spec" in
       calibrated) names+=("calibrated$suffix"); train_args+=("--lr $lr --margin calibrated") ;;
+      calibrated-ema:*) b=$(printf '%g' "${spec#calibrated-ema:}"); names+=("calibrated-ema$b$suffix")
+               train_args+=("--lr $lr --margin calibrated --k-ema $b") ;;
+      calibrated-logistic) names+=("calibrated-logistic$suffix")
+               train_args+=("--lr $lr --margin calibrated --k-family logistic") ;;
+      calibrated-logistic-ema:*) b=$(printf '%g' "${spec#calibrated-logistic-ema:}")
+               names+=("calibrated-logistic-ema$b$suffix")
+               train_args+=("--lr $lr --margin calibrated --k-family logistic --k-ema $b") ;;
       fixed:*) g=$(printf '%g' "${spec#fixed:}"); names+=("fixed-g$g$suffix")
                train_args+=("--lr $lr --margin fixed --gamma $g") ;;
-      *) echo "unknown variant $spec (use fixed:<gamma> or calibrated)" >&2; exit 2 ;;
+      *) echo "unknown variant $spec (use fixed:<gamma> or calibrated[-logistic][-ema:<decay>])" >&2; exit 2 ;;
     esac
   done
 done

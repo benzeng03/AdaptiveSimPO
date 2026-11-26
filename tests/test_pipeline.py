@@ -40,6 +40,12 @@ class PipelineSmokeTest(unittest.TestCase):
             run = tmp / "run"
             train.main(common + ["--margin", "fixed", "--gamma", "0.5", "--output", str(run / "fixed-g0.5")])
             train.main(common + ["--margin", "calibrated", "--output", str(run / "calibrated")])
+            lg = tmp / "logistic-run" / "calibrated-logistic-ema0.5"
+            train.main(common + ["--k-family", "logistic", "--k-ema", "0.5", "--output", str(lg)])
+            self.assertEqual(json.loads((lg / "margin_stats.json").read_text())["variant"], "calibrated-logistic-ema0.5")
+            self.assertIn("calib_c", json.loads((lg / "metrics.jsonl").read_text().splitlines()[0]))
+            with self.assertRaises(SystemExit):  # the family belongs to the calibrated margin
+                train.main(common + ["--margin", "fixed", "--k-family", "logistic", "--output", str(tmp / "bad")])
             train.main(common + ["--margin", "fixed", "--gamma", "0.75", "--max-steps", "1",
                                  "--output", str(run / "fixed-g0.75")])
 
@@ -56,16 +62,33 @@ class PipelineSmokeTest(unittest.TestCase):
             dev = tmp / "dev.jsonl"
             dev.write_text("\n".join(json.dumps(r) for r in data[:4]), encoding="utf-8")
 
-            # DPO: the reference is the model with the adapter disabled, and the fresh LoRA
-            # adapter is a no-op, so the first loss is exactly log 2.
-            dpo_run = tmp / "dpo-run"
-            train.main(common + ["--loss", "dpo", "--output", str(dpo_run / "dpo-b0.1")])
-            first_dpo = json.loads((dpo_run / "dpo-b0.1" / "metrics.jsonl").read_text().splitlines()[0])
+            # Other rewards. DPO: the reference is the model with the adapter disabled, and the fresh
+            # LoRA adapter is a no-op, so the first loss is exactly log 2.
+            rw_run = tmp / "reward-run"
+            for name, extra in (("dpo-fixed-g0", ["--reward", "dpo", "--margin", "fixed", "--gamma", "0"]),
+                                ("dpo-calibrated", ["--reward", "dpo"]),
+                                ("dpo-noref-calibrated", ["--reward", "dpo-noref"]),
+                                ("rdpo-a0.05-fixed-g0", ["--reward", "r-dpo", "--margin", "fixed", "--gamma", "0"]),
+                                ("orpo-l0.1-calibrated", ["--reward", "orpo", "--max-steps", "1"])):
+                train.main(common + extra + ["--output", str(rw_run / name)])
+                stats_ = json.loads((rw_run / name / "margin_stats.json").read_text())
+                self.assertEqual(stats_["variant"], name)
+            first_dpo = json.loads((rw_run / "dpo-fixed-g0" / "metrics.jsonl").read_text().splitlines()[0])
             self.assertAlmostEqual(first_dpo["loss"], math.log(2), places=5)
-            dpo_stats = json.loads((dpo_run / "dpo-b0.1" / "margin_stats.json").read_text())
-            self.assertEqual((dpo_stats["variant"], dpo_stats["loss"], dpo_stats["steps"]), ("dpo-b0.1", "dpo", 2))
-            score_pairs.main([str(dpo_run), "--split", "test", "--data", str(dev), "--batch-size", "2", "--no-base"])
-            self.assertEqual(json.loads((dpo_run / "test_scores.json").read_text())[0]["margin"], "dpo")
+            first_cal = json.loads((rw_run / "dpo-calibrated" / "metrics.jsonl").read_text().splitlines()[0])
+            self.assertEqual(first_cal["calib_k"], 0.01)  # all gaps are 0 at the start: k at its lower bound
+            first_rdpo = json.loads((rw_run / "rdpo-a0.05-fixed-g0" / "metrics.jsonl").read_text().splitlines()[0])
+            self.assertNotAlmostEqual(first_rdpo["reward_gap"], 0.0, places=4)  # the length offset alone
+            orpo = json.loads((rw_run / "orpo-l0.1-calibrated" / "metrics.jsonl").read_text().splitlines()[0])
+            self.assertAlmostEqual(orpo["loss"], orpo["nll"] + 0.1 * orpo["pref_loss"], places=5)
+            with self.assertRaises(SystemExit):  # DPO needs LoRA for its reference
+                train.main(common + ["--reward", "dpo", "--no-lora", "--output", str(tmp / "bad")])
+            score_pairs.main([str(rw_run), "--split", "test", "--data", str(dev), "--batch-size", "2", "--no-base"])
+            rw_scores = {r["adapter"]: r for r in json.loads((rw_run / "test_scores.json").read_text())}
+            self.assertEqual(rw_scores["rdpo-a0.05-fixed-g0"]["reward"], "r-dpo")
+            self.assertEqual(rw_scores["dpo-calibrated"]["margin"], "calibrated")
+            self.assertIn("accuracy_mean_logp", rw_scores["orpo-l0.1-calibrated"])
+            self.assertIsNone(score_pairs.select_fixed(list(rw_scores.values())))  # baselines are SimPO only
 
             score_pairs.main([str(run), "--data", str(dev), "--batch-size", "2"])
             scores = json.loads((run / "dev_scores.json").read_text())
@@ -119,7 +142,7 @@ class PipelineSmokeTest(unittest.TestCase):
             train.main(common + ["--output", str(tmp / "full")])
 
             calls = {"n": 0}
-            real = train.batch_logps
+            real = train.batch_logp_sums
 
             def dies_at_step_8(*a, **k):
                 calls["n"] += 1
@@ -128,7 +151,7 @@ class PipelineSmokeTest(unittest.TestCase):
                 return real(*a, **k)
 
             cut = tmp / "cut"
-            with mock.patch.object(train, "batch_logps", dies_at_step_8), self.assertRaises(KeyboardInterrupt):
+            with mock.patch.object(train, "batch_logp_sums", dies_at_step_8), self.assertRaises(KeyboardInterrupt):
                 train.main(common + ["--output", str(cut)])
             self.assertTrue((cut / "checkpoint" / "state.json").exists())
             self.assertEqual(len((cut / "metrics.jsonl").read_text().splitlines()), 7)
@@ -136,6 +159,11 @@ class PipelineSmokeTest(unittest.TestCase):
                 train.main(common + ["--output", str(cut)])
             with self.assertRaises(SystemExit):  # resuming with other settings is refused
                 train.main(common + ["--output", str(cut), "--resume", "--lr", "1e-2"])
+            # a checkpoint written before --k-ema existed has no k_ema key: it counts as the default
+            state_file = cut / "checkpoint" / "state.json"
+            state = json.loads(state_file.read_text())
+            del state["args"]["k_ema"]
+            state_file.write_text(json.dumps(state))
             train.main(common + ["--output", str(cut), "--resume"])
 
             self.assertFalse((cut / "checkpoint").exists())
@@ -153,10 +181,30 @@ class PipelineSmokeTest(unittest.TestCase):
             for key in ("steps", "pairs_seen", "gamma_mean", "calib_k_mean", "weight_share_misranked"):
                 self.assertAlmostEqual(full_stats[key], cut_stats[key], places=5)
 
+            # --k-ema: the moving averages are carried by the checkpoint, so k matches step by step.
+            ema_args = common + ["--k-ema", "0.8"]
+            train.main(ema_args + ["--output", str(tmp / "ema-full")])
+            calls["n"] = 0
+            with mock.patch.object(train, "batch_logp_sums", dies_at_step_8), self.assertRaises(KeyboardInterrupt):
+                train.main(ema_args + ["--output", str(tmp / "ema-cut")])
+            with self.assertRaises(SystemExit):  # the decay cannot change on resume
+                train.main(common + ["--k-ema", "0.5", "--output", str(tmp / "ema-cut"), "--resume"])
+            train.main(ema_args + ["--output", str(tmp / "ema-cut"), "--resume"])
+            ema_full = [json.loads(l) for l in (tmp / "ema-full" / "metrics.jsonl").read_text().splitlines()]
+            ema_cut = [json.loads(l) for l in (tmp / "ema-cut" / "metrics.jsonl").read_text().splitlines()]
+            self.assertEqual(len(ema_cut), 8)
+            for a, b in zip(ema_full, ema_cut):
+                self.assertAlmostEqual(a["calib_k"], b["calib_k"], places=6)
+                self.assertAlmostEqual(a["loss"], b["loss"], places=5)
+            per_batch = [r["calib_k"] for r in full_log]
+            self.assertNotEqual([round(r["calib_k"], 6) for r in ema_full][1:], [round(k, 6) for k in per_batch][1:])
+            self.assertEqual(json.loads((tmp / "ema-full" / "margin_stats.json").read_text())["variant"],
+                             "calibrated-ema0.8")
+
             # Killed before the first checkpoint: --resume starts over in the same directory.
             early = tmp / "early"
             calls["n"] = 0
-            with mock.patch.object(train, "batch_logps",
+            with mock.patch.object(train, "batch_logp_sums",
                                    lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt)), \
                     self.assertRaises(KeyboardInterrupt):
                 train.main(common + ["--output", str(early)])
@@ -201,7 +249,7 @@ class PipelineSmokeTest(unittest.TestCase):
             self.assertTrue(any(not torch.equal(trained[k].float(), base[k].float()) for k in base))
 
             calls = {"n": 0}
-            real = train.batch_logps
+            real = train.batch_logp_sums
 
             def dies_at_step_4(*a, **k):
                 calls["n"] += 1
@@ -210,7 +258,7 @@ class PipelineSmokeTest(unittest.TestCase):
                 return real(*a, **k)
 
             cut = tmp / "cut"
-            with mock.patch.object(train, "batch_logps", dies_at_step_4), self.assertRaises(KeyboardInterrupt):
+            with mock.patch.object(train, "batch_logp_sums", dies_at_step_4), self.assertRaises(KeyboardInterrupt):
                 train.main(common + ["--no-lora", "--output", str(cut)])
             ckpt = sorted(p.name for p in (cut / "checkpoint").iterdir())
             self.assertEqual(ckpt, ["optimizer.pt", "state.json"])  # the weights are the fp32 masters

@@ -72,7 +72,7 @@ def main(argv=None):
     stats = {d.name: margin_stats(d) for d in sorted(run.iterdir()) if (d / "margin_stats.json").exists()}
     # GPT-judge summaries written by research/llm_judge.py (one per comparison).
     judged = [load(f) for f in sorted(run.glob("generations-*/llm-judge-*/summary_*.json"))
-              if "-limit" not in f.parent.name]
+              if "-limit" not in f.parent.name and "-sample" not in f.parent.name]
     selection = load(run / "selection.json") or {}
     baseline = selection.get("best_fixed")
     names = list(dev) if dev else list(stats)  # dev_scores lists exactly the scored variants

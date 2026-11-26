@@ -97,6 +97,20 @@ def batch_logps(model, rows, tokenizer, max_length, max_prompt, device, chat_pro
                 truncation="always"):
     """Per-token mean (average=True, SimPO) or summed (average=False, DPO) log-probabilities
     (chosen, rejected) for a list of pairs."""
+    sums, lengths = _answer_logps(model, rows, tokenizer, max_length, max_prompt, device, chat_prompt, truncation)
+    return (sums / lengths if average else sums).chunk(2)
+
+
+def batch_logp_sums(model, rows, tokenizer, max_length, max_prompt, device, chat_prompt=True,
+                    truncation="always"):
+    """Summed answer log-probabilities and answer lengths (tokens scored, after truncation):
+    (chosen_sum, rejected_sum, chosen_len, rejected_len). The mean log-probability is sum / len."""
+    sums, lengths = _answer_logps(model, rows, tokenizer, max_length, max_prompt, device, chat_prompt, truncation)
+    return (*sums.chunk(2), *lengths.chunk(2))
+
+
+def _answer_logps(model, rows, tokenizer, max_length, max_prompt, device, chat_prompt, truncation):
+    """(summed log-probabilities, answer token counts) for [chosen..., rejected...] of the pairs."""
     encoded = [encode_pair(r, tokenizer, max_length, max_prompt, chat_prompt, truncation) for r in rows]
     sequences = [pair[i] for i in (0, 1) for pair in encoded]
     width = max(len(ids) for ids, _ in sequences)
@@ -110,15 +124,15 @@ def batch_logps(model, rows, tokenizer, max_length, max_prompt, device, chat_pro
         mask[i, :len(tokens)] = 1
     ids, mask, labels = ids.to(device), mask.to(device), labels.to(device)
     lm = model.get_base_model() if hasattr(model, "peft_config") else model
+    lengths = labels[:, 1:].ne(-100).sum(1)
     if hasattr(lm, "model") and hasattr(lm, "lm_head"):
-        logps = _chunked_answer_logps(lm, ids, mask, labels, average=average)
+        sums = _chunked_answer_logps(lm, ids, mask, labels, average=False)
     else:
         logits = model(input_ids=ids, attention_mask=mask, use_cache=False).logits
-        targets = labels[:, 1:]
-        nll = F.cross_entropy(logits[:, :-1].float().transpose(1, 2), targets,
+        nll = F.cross_entropy(logits[:, :-1].float().transpose(1, 2), labels[:, 1:],
                               ignore_index=-100, reduction="none")
-        logps = -nll.sum(1) / targets.ne(-100).sum(1) if average else -nll.sum(1)
-    return logps.chunk(2)
+        sums = -nll.sum(1)
+    return sums, lengths
 
 
 def adapter_key(name: str) -> str:

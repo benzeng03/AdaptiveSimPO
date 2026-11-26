@@ -11,8 +11,10 @@ Dev pairs select the fixed baseline; test pairs are scored for reporting only.
 .\run_experiment.ps1 -Variants "fixed:2","calibrated" -SkipEval
 .\run_experiment.ps1 -RunDir outputs\run-bs16-lr0.0001-ep1-seed42-C -EvalOnly -Variants "fixed:0","fixed:1","fixed:2","calibrated"
 
-Variant specs:  fixed:<gamma> | calibrated
+Variant specs:  fixed:<gamma> | calibrated[-logistic][-ema:<decay>]
   calibrated: gamma_i = (1 - k) r_i with k = 2 mean / var of the current batch's reward gaps
+  calibrated-ema:0.9: the same with k from moving averages of the gap moments (train.py --k-ema 0.9)
+  calibrated-logistic: logistic location reference instead of the normal, a saturating logit (--k-family logistic)
 With -SkipEval no fixed variant is required (no baseline is needed). With -EvalOnly pass the same
 -Variants as the run directory contains: the adapter list is built from them.
 Re-running with an existing -RunDir trains only missing variants and reuses cached generations.
@@ -55,6 +57,16 @@ function Invoke-Python {
 }
 
 function Convert-Variant([string]$Spec) {
+    if ($Spec -match '^calibrated-logistic(-ema:(.+))?$') {
+        $a = @("--margin", "calibrated", "--k-family", "logistic")
+        if (!$Matches[2]) { return [pscustomobject]@{ Name = "calibrated-logistic"; Args = $a } }
+        $b = [double]::Parse($Matches[2], $inv).ToString("R", $inv)
+        return [pscustomobject]@{ Name = "calibrated-logistic-ema$b"; Args = $a + @("--k-ema", $b) }
+    }
+    if ($Spec -match '^calibrated-ema:(.+)$') {
+        $b = [double]::Parse($Matches[1], $inv).ToString("R", $inv)
+        return [pscustomobject]@{ Name = "calibrated-ema$b"; Args = @("--margin", "calibrated", "--k-ema", $b) }
+    }
     if ($Spec -match '^calibrated(:.*)?$') {
         return [pscustomobject]@{ Name = "calibrated"; Args = @("--margin", "calibrated") }
     }
@@ -63,7 +75,7 @@ function Convert-Variant([string]$Spec) {
         $v = [double]::Parse($value, $inv).ToString("R", $inv)
         return [pscustomobject]@{ Name = "fixed-g$v"; Args = @("--margin", "fixed", "--gamma", $v) }
     }
-    throw "Unknown variant '$Spec' (use fixed:<gamma> or calibrated)"
+    throw "Unknown variant '$Spec' (use fixed:<gamma> or calibrated[-logistic][-ema:<decay>])"
 }
 
 # Resolved here because $PSScriptRoot is empty in param defaults under `powershell -File` (PS 5.1).

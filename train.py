@@ -1,6 +1,8 @@
-"""Train one SimPO policy (fixed or calibrated margin), or a DPO policy (--loss dpo), on JSONL pairs.
+"""Train one preference-optimisation policy on JSONL pairs: a margin rule (--margin fixed or
+calibrated) applied to a reward gap (--reward simpo, dpo, dpo-noref, r-dpo or orpo; see
+adaptive_simpo/rewards.py). The loss is softplus(gamma_i - r_i), plus the chosen answer's NLL for ORPO.
 
-DPO uses summed log-probabilities and the frozen base model as reference: with LoRA the
+DPO and R-DPO use summed log-probabilities and the frozen base model as reference: with LoRA the
 reference is the same model with the adapter disabled, so no second copy is loaded.
 
 Every variant shares the model, data, shuffling order, LoRA initialisation and
@@ -21,8 +23,9 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from adaptive_simpo.margins import KINDS, MarginConfig, dpo_loss, simpo_loss
-from adaptive_simpo.modeling import TRUNCATIONS, batch_logps, read_jsonl
+from adaptive_simpo.margins import FAMILIES, KINDS, MarginConfig, MomentEMA, margin_loss
+from adaptive_simpo.modeling import TRUNCATIONS, batch_logp_sums, read_jsonl
+from adaptive_simpo.rewards import DEFAULT_BETA, NEEDS_REFERENCE, REWARDS, reward_gap
 from adaptive_simpo.optim import MasterAdamW, make_optimizer
 
 HERE = Path(__file__).resolve().parent
@@ -33,10 +36,25 @@ def build_parser():
     p.add_argument("--model", default=str(HERE / "models/Qwen3-0.6B"))
     p.add_argument("--data", default=str(HERE / "data/uf_train4096.jsonl"))
     p.add_argument("--output", required=True)
-    p.add_argument("--loss", choices=("simpo", "dpo"), default="simpo")
-    p.add_argument("--margin", choices=KINDS, default="calibrated", help="SimPO margin rule")
+    p.add_argument("--reward", choices=REWARDS, default="simpo",
+                   help="reward gap the margin acts on (adaptive_simpo/rewards.py)")
+    p.add_argument("--margin", choices=KINDS, default="calibrated", help="margin rule")
     p.add_argument("--gamma", type=float, default=0.5, help="fixed margin (reward units)")
-    p.add_argument("--beta", type=float, default=None, help="default 2.0 for SimPO, 0.1 for DPO")
+    p.add_argument("--k-ema", type=float, default=0.0,
+                   help="calibrated margin: estimate k = 2 mean / var from exponential moving averages "
+                        "(this decay, bias-corrected, one update per micro-batch) of the gap mean and "
+                        "second moment instead of the current batch alone; 0 = current batch only")
+    p.add_argument("--k-family", choices=FAMILIES, default="normal",
+                   help="calibrated margin: reference distribution of the gaps, estimated from their mean "
+                        "and variance. normal: linear logit 2 mean r / var; logistic: logistic location "
+                        "model, a logit that rises with slope (2/s) tanh(mean/2s) and saturates at "
+                        "2 mean / s, s = sqrt(3 var) / pi (adaptive_simpo/margins.py)")
+    p.add_argument("--beta", type=float, default=None,
+                   help="reward scale; default 2.0 for simpo, 0.1 for dpo / dpo-noref / r-dpo, 1.0 for orpo")
+    p.add_argument("--rdpo-alpha", type=float, default=0.05,
+                   help="r-dpo: r = DPO gap + alpha * (|y_w| - |y_l|) in answer tokens")
+    p.add_argument("--orpo-lambda", type=float, default=0.1,
+                   help="orpo: loss = NLL(y_w) + lambda * preference loss")
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--accumulate", type=int, default=1,
@@ -70,7 +88,18 @@ def build_parser():
 
 
 def margin_config(args):
-    return MarginConfig(kind=args.margin, gamma=args.gamma)
+    return MarginConfig(kind=args.margin, gamma=args.gamma, k_ema=args.k_ema, family=args.k_family)
+
+
+def variant_name(args, cfg):
+    """fixed-g2 / calibrated for SimPO; otherwise <reward>[-a<alpha>|-l<lambda>][-b<beta>]-<margin>,
+    with beta only when it is not the reward's default (e.g. dpo-fixed-g0, rdpo-a0.05-calibrated)."""
+    if args.reward == "simpo" and args.beta == DEFAULT_BETA["simpo"]:
+        return cfg.name
+    tag = {"r-dpo": f"rdpo-a{args.rdpo_alpha:g}", "orpo": f"orpo-l{args.orpo_lambda:g}"}.get(args.reward, args.reward)
+    if args.beta != DEFAULT_BETA[args.reward]:
+        tag += f"-b{args.beta:g}"
+    return f"{tag}-{cfg.name}"
 
 
 # Arguments that may differ between an interrupted run and its resumption.
@@ -126,11 +155,23 @@ def main(argv=None):
     if min(args.epochs, args.batch_size, args.accumulate) < 1:
         parser.error("epochs, batch-size and accumulate must be positive")
     if args.beta is None:
-        args.beta = 0.1 if args.loss == "dpo" else 2.0
-    if args.loss == "dpo" and not args.lora:
-        parser.error("--loss dpo needs --lora (the reference is the model with the adapter disabled)")
-    cfg = margin_config(args)
-    variant = f"dpo-b{args.beta:g}" if args.loss == "dpo" else cfg.name
+        args.beta = DEFAULT_BETA[args.reward]
+    if not (math.isfinite(args.beta) and args.beta > 0):
+        parser.error("beta must be positive and finite")
+    if args.reward in NEEDS_REFERENCE and not args.lora:
+        parser.error(f"--reward {args.reward} needs --lora (the reference is the model with the adapter disabled)")
+    if not math.isfinite(args.rdpo_alpha) or not (math.isfinite(args.orpo_lambda) and args.orpo_lambda >= 0):
+        parser.error("rdpo-alpha must be finite and orpo-lambda finite and >= 0")
+    if args.k_ema and args.margin != "calibrated":
+        parser.error("--k-ema applies only to --margin calibrated")
+    if args.k_family != "normal" and args.margin != "calibrated":
+        parser.error("--k-family applies only to --margin calibrated")
+    try:
+        cfg = margin_config(args)
+    except ValueError as err:
+        parser.error(str(err))
+    ema = MomentEMA(cfg.k_ema) if cfg.kind == "calibrated" and cfg.k_ema else None
+    variant = variant_name(args, cfg)
     output = Path(args.output)
     if args.checkpoint_every < 0:
         parser.error("checkpoint-every must be >= 0")
@@ -145,8 +186,9 @@ def main(argv=None):
     output.mkdir(parents=True, exist_ok=True)
     if ckpt is not None:
         saved = json.loads((ckpt / "state.json").read_text(encoding="utf-8"))["args"]
-        changed = {k: (saved.get(k), v) for k, v in vars(args).items()
-                   if k not in RESUME_FREE and saved.get(k) != v}
+        # an option added after the checkpoint was written counts as its default there
+        changed = {k: (saved.get(k, parser.get_default(k)), v) for k, v in vars(args).items()
+                   if k not in RESUME_FREE and saved.get(k, parser.get_default(k)) != v}
         if changed:
             parser.error(f"--resume with different arguments than the checkpoint (old, new): {changed}")
 
@@ -188,6 +230,8 @@ def main(argv=None):
         state = load_checkpoint(ckpt, model, optimizer, scheduler)
         step, totals, elapsed = state["step"], state["totals"], state["seconds"]
         next_batch = tuple(state["next_batch"])
+        if ema is not None:
+            ema.load_state_dict(state["ema"])
         kept = metrics.read_text(encoding="utf-8").splitlines()[:step] if metrics.exists() else []
         metrics.write_text("".join(line + "\n" for line in kept), encoding="utf-8")
         print(f"[train] resuming from {ckpt.name} at step {step} (epoch {next_batch[0]}, batch {next_batch[1]})",
@@ -204,19 +248,20 @@ def main(argv=None):
                 if index % args.accumulate == 0:
                     optimizer.zero_grad(set_to_none=True)
                     window = min(len(rows) - index * args.batch_size, args.batch_size * args.accumulate)
-                dpo = args.loss == "dpo"
-                chosen, rejected = batch_logps(model, pairs, tokenizer, args.max_length, args.max_prompt,
-                                               args.device, args.chat_prompt, average=not dpo,
-                                               truncation=args.truncation)
-                if dpo:
+                encode = dict(tokenizer=tokenizer, max_length=args.max_length, max_prompt=args.max_prompt,
+                              device=args.device, chat_prompt=args.chat_prompt, truncation=args.truncation)
+                cs, rs, cl, rl = batch_logp_sums(model, pairs, **encode)
+                ref = {}
+                if args.reward in NEEDS_REFERENCE:
                     with torch.no_grad(), model.disable_adapter():
-                        ref_chosen, ref_rejected = batch_logps(model, pairs, tokenizer, args.max_length,
-                                                               args.max_prompt, args.device,
-                                                               args.chat_prompt, average=False,
-                                                               truncation=args.truncation)
-                    loss, scores, gamma, stats = dpo_loss(chosen, rejected, ref_chosen, ref_rejected, args.beta)
-                else:
-                    loss, scores, gamma, stats = simpo_loss(chosen, rejected, args.beta, cfg)
+                        ref_cs, ref_rs, _, _ = batch_logp_sums(model, pairs, **encode)
+                    ref = dict(ref_chosen_sum=ref_cs, ref_rejected_sum=ref_rs)
+                gaps = reward_gap(args.reward, args.beta, cs, rs, cl, rl, alpha=args.rdpo_alpha, **ref)
+                loss, scores, gamma, stats = margin_loss(gaps, cfg, ema)
+                if args.reward == "orpo":
+                    nll = -(cs.float() / cl).mean()
+                    stats.update(pref_loss=loss.item(), nll=nll.item())
+                    loss = nll + args.orpo_lambda * loss
                 (loss * (len(pairs) / window)).backward()
                 updated = (index + 1) % args.accumulate == 0 or index + 1 == len(loader)
                 if updated:
@@ -234,6 +279,9 @@ def main(argv=None):
                 totals["share"] += stats["weight_share_misranked"]
                 totals["weight"] += stats["weight_mean"]
                 totals["k"] += stats.get("calib_k", 0.0)
+                if stats.get("calib_c") is not None:  # logistic family; checkpoints before it lack these keys
+                    totals["c"] = totals.get("c", 0.0) + stats["calib_c"]
+                    totals["c_n"] = totals.get("c_n", 0) + 1
                 totals["steps"] += 1
                 log.write(json.dumps(record) + "\n")
                 log.flush()
@@ -245,7 +293,8 @@ def main(argv=None):
                     saving = time.time()
                     save_checkpoint(output, model, optimizer, scheduler, dict(
                         step=step, next_batch=following, totals=totals,
-                        seconds=elapsed + time.time() - start, args=vars(args)))
+                        seconds=elapsed + time.time() - start, args=vars(args),
+                        ema=None if ema is None else ema.state_dict()))
                     print(f"[train] checkpoint at step {step} ({time.time() - saving:.1f} s)", flush=True)
                 if args.max_steps and step >= args.max_steps:
                     done = True
@@ -257,15 +306,17 @@ def main(argv=None):
 
     model.save_pretrained(output)
     tokenizer.save_pretrained(output)
-    summary = dict(variant=variant, loss=args.loss, margin=None if args.loss == "dpo" else cfg.to_dict(), steps=step, pairs_seen=totals["n"],
+    summary = dict(variant=variant, reward=args.reward, beta=args.beta, margin=cfg.to_dict(), steps=step, pairs_seen=totals["n"],
                    seconds=round(elapsed + time.time() - start, 1),
                    gamma_mean=totals["gamma"] / totals["n"],
                    active=totals["active"] / totals["n"])
     if totals["steps"]:
         summary.update(weight_mean=totals["weight"] / totals["steps"],
                        weight_share_misranked=totals["share"] / totals["steps"])
-        if args.loss == "simpo" and cfg.kind == "calibrated":
+        if cfg.kind == "calibrated":
             summary.update(calib_k_mean=totals["k"] / totals["steps"])
+        if totals.get("c_n"):
+            summary.update(calib_c_mean=totals["c"] / totals["c_n"], calib_c_steps=totals["c_n"])
     # margin_stats.json last: run.sh treats it as "this variant is finished"
     (output / "training_args.json").write_text(json.dumps(vars(args), indent=2), encoding="utf-8")
     (output / "margin_stats.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
