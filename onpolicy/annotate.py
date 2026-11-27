@@ -50,9 +50,14 @@ def binarize(record, scores):
 
 def armorm_scorer(path, device):
     import torch
+    import transformers.models.llama.modeling_llama as llama
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
-    model = AutoModelForSequenceClassification.from_pretrained(path, device_map=device, trust_remote_code=True,
-                                                               torch_dtype=torch.bfloat16)
+    # ArmoRM's modeling_custom.py imports this docstring constant, which transformers 5 removed;
+    # it only decorates forward(), so an empty string changes nothing in the computation.
+    if not hasattr(llama, "LLAMA_INPUTS_DOCSTRING"):
+        llama.LLAMA_INPUTS_DOCSTRING = ""
+    model = AutoModelForSequenceClassification.from_pretrained(path, trust_remote_code=True,
+                                                               dtype=torch.bfloat16).to(device).eval()
     tok = AutoTokenizer.from_pretrained(path, use_fast=True)
 
     @torch.no_grad()
