@@ -37,6 +37,7 @@
 #   --checkpoint-every N    training checkpoint interval in steps (a rerun resumes from it) [32]
 #   --skip-train --skip-gen --shutdown
 #   --train-data --dev-data --test-data FILE                [data/uf_train4096 / uf_dev500 / uf_test1486]
+#                           --dev-data none: no dev split; models are scored and selected on the test set only
 # Generation: the baseline and the calibrated variant (with several lrs, the calibrated one with
 # the best dev+test accuracy). Full-model weights stay on the VM: the packed archive leaves them out.
 # Env: PY (interpreter, default .venv/bin/python), EXTRA_TRAIN_ARGS (e.g. "--max-steps 2" for a smoke test).
@@ -101,7 +102,8 @@ fi
 case "$MASTER" in gpu|cpu) ;; *) echo "--fp32-master must be gpu or cpu" >&2; exit 2 ;; esac
 case "$SCHEDULE" in constant|cosine) ;; *) echo "--schedule must be constant or cosine" >&2; exit 2 ;; esac
 [ -x "$PY" ] || [ -f "$PY" ] || { echo "missing interpreter $PY (run cloud/setup.sh)" >&2; exit 1; }
-for f in "$TRAIN_DATA" "$DEV_DATA" "$TEST_DATA"; do
+[ "$DEV_DATA" = none ] && DEV_DATA=""
+for f in "$TRAIN_DATA" ${DEV_DATA:+"$DEV_DATA"} "$TEST_DATA"; do
   [ -f "$f" ] || { echo "missing data file $f (cloud/GUIDE.zh.md, step 4)" >&2; exit 1; }
 done
 ARENA_DATA=data/arena-hard-v0.1/question.jsonl
@@ -166,13 +168,15 @@ if [ "$SKIP_TRAIN" = 0 ]; then
     # shellcheck disable=SC2086
     "$PY" -u train.py --data "$TRAIN_DATA" --batch-size "$BS" --seed "$SEED" --schedule "$SCHEDULE" \
       --epochs "$EPOCHS" --max-length "$MAX_LEN" --max-prompt "$MAX_PROMPT" --truncation "$TRUNC" ${train_args[$i]} $model_args \
-      --checkpoint-every "$CKPT_EVERY" --resume --eval-data "$DEV_DATA" "$TEST_DATA" ${EXTRA_TRAIN_ARGS:-} --output "$out"
+      --checkpoint-every "$CKPT_EVERY" --resume --eval-data ${DEV_DATA:+"$DEV_DATA"} "$TEST_DATA" ${EXTRA_TRAIN_ARGS:-} --output "$out"
   done
 fi
 
 # ---- score preference pairs (lengths come from each model's training_args.json)
 echo "=== $(date '+%F %T') scoring"
-"$PY" -u score_pairs.py "$RUN_DIR" --split dev --data "$DEV_DATA" --adapters "${names[@]}"
+if [ -n "$DEV_DATA" ]; then
+  "$PY" -u score_pairs.py "$RUN_DIR" --split dev --data "$DEV_DATA" --adapters "${names[@]}"
+fi
 "$PY" -u score_pairs.py "$RUN_DIR" --split test --data "$TEST_DATA" --adapters "${names[@]}"
 "$PY" -u summarize.py "$RUN_DIR"
 
@@ -180,9 +184,10 @@ gen_names=()
 fixed=(); for n in "${names[@]}"; do [[ $n == fixed-g* ]] && fixed+=("$n"); done
 calibrated=(); for n in "${names[@]}"; do [[ $n == calibrated* ]] && calibrated+=("$n"); done
 if [ ${#fixed[@]} -gt 0 ]; then
-  # "test" in reports = dev + test merged (1986 pairs); the fixed baseline is the best one there.
-  DEVTEST="$RUN_DIR/devtest1986_scores.json"
-  "$PY" research/devtest_scores.py "$RUN_DIR" --baseline "${fixed[0]}" --dev-data "$DEV_DATA" \
+  # "test" in reports = dev + test merged (1986 pairs), or the test set alone with --dev-data none;
+  # the fixed baseline is the best one there.
+  DEVTEST="$RUN_DIR/devtest1986_scores.json"; [ -n "$DEV_DATA" ] || DEVTEST="$RUN_DIR/testset_scores.json"
+  "$PY" research/devtest_scores.py "$RUN_DIR" --baseline "${fixed[0]}" --dev-data "${DEV_DATA:-none}" \
     --test-data "$TEST_DATA" --out "$DEVTEST" > /dev/null
   read -r best best_cal < <("$PY" - "$DEVTEST" <<'EOF'
 import json, re, sys
@@ -196,8 +201,8 @@ print(fixed[0]["adapter"], cal[0]["adapter"] if cal else "-")
 EOF
 )
   BASELINE=${BASELINE:-$best}
-  echo "=== dev+test accuracy (baseline $BASELINE; best fixed on dev+test: $best; best calibrated: $best_cal)"
-  "$PY" research/devtest_scores.py "$RUN_DIR" --baseline "$BASELINE" --dev-data "$DEV_DATA" \
+  echo "=== $([ -n "$DEV_DATA" ] && echo dev+test || echo test-set) accuracy (baseline $BASELINE; best fixed: $best; best calibrated: $best_cal)"
+  "$PY" research/devtest_scores.py "$RUN_DIR" --baseline "$BASELINE" --dev-data "${DEV_DATA:-none}" \
     --test-data "$TEST_DATA" --out "$DEVTEST"
   gen_names+=("$BASELINE")
   if [ ${#calibrated[@]} -gt 1 ]; then gen_names+=("$best_cal"); else gen_names+=("${calibrated[@]}"); fi

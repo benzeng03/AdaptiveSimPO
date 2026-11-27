@@ -9,6 +9,9 @@ outputs/devtest1986_scores.json) with accuracy per adapter and paired comparison
 baseline (bootstrap CI + exact McNemar, as in summarize.py).
 
     python research/devtest_scores.py outputs/run-A outputs/run-B --baseline fixed-g2
+
+With --dev-data none there is no dev split: the test scores alone are used (the on-policy test
+set, every test_prefs prompt).
 """
 import argparse
 import json
@@ -39,15 +42,16 @@ def main(argv=None):
     p.add_argument("--out", type=Path, default=HERE / "outputs/devtest1986_scores.json")
     a = p.parse_args(argv)
 
-    dev_rows, test_rows = read_jsonl(a.dev_data), read_jsonl(a.test_data)
+    no_dev = str(a.dev_data) == "none"
+    dev_rows, test_rows = ([] if no_dev else read_jsonl(a.dev_data)), read_jsonl(a.test_data)
     rows = dev_rows + test_rows
     strict = torch.tensor([r.get("score_chosen", 1.0) != r.get("score_rejected", 0.0) for r in rows])
     gaps, source = {}, {}
     for run in a.runs:
-        dev, test = load(run, "dev"), load(run, "test")
-        for name in dev:
+        dev, test = ({} if no_dev else load(run, "dev")), load(run, "test")
+        for name in (test if no_dev else dev):
             if name in test and name not in gaps and (not a.adapters or name in a.adapters):
-                d, t = dev[name]["gaps"], test[name]["gaps"]
+                d, t = ([] if no_dev else dev[name]["gaps"]), test[name]["gaps"]
                 if len(d) != len(dev_rows) or len(t) != len(test_rows):
                     raise SystemExit(f"{run}/{name}: scored on different dev/test files")
                 gaps[name], source[name] = d + t, str(run)
@@ -73,7 +77,7 @@ def main(argv=None):
     order = lambda r: (r["adapter"] != "base", not r["adapter"].startswith("fixed-g"),
                        gamma(r["adapter"]), r["adapter"])
     results.sort(key=order)
-    a.out.write_text(json.dumps(dict(baseline=a.baseline, data="dev500 + test1486", results=results), indent=2),
+    a.out.write_text(json.dumps(dict(baseline=a.baseline, data=f"test set {a.test_data.name}" if no_dev else "dev500 + test1486", results=results), indent=2),
                      encoding="utf-8")
     for r in results:
         line = f"{r['adapter']:18s} {r['correct']}/{r['pairs']}  {100 * r['accuracy']:.2f}%  untied {100 * r['accuracy_untied']:.2f}%"

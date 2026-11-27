@@ -4,18 +4,19 @@
 # vLLM, at most 4096 new tokens, Qwen3 model-card sampling: temperature 0.7, top-p 0.8, top-k 20;
 # SimPO used temperature 0.8, top-p 0.95), prompts with identical answers under
 # every seed are dropped, RLHFlow/ArmoRM-Llama3-8B-v0.1 scores each answer, and the highest / lowest
-# scoring answers become chosen / rejected. Writes data/uf_onpolicy_{train4096,dev500,test1486}.jsonl.
+# scoring answers become chosen / rejected. Writes data/uf_onpolicy_{train4096,test2000}.jsonl
+# (the test set is every test_prefs prompt, data/uf_test2000.jsonl; there is no dev split).
 #
 #   bash cloud/onpolicy.sh            # a rerun skips finished seeds and already-scored prompts
 #
 # vLLM and the reward model run in their own environment, .venv-gen (Python 3.12): vLLM pins its own
 # torch and transformers, and ArmoRM's custom model code (trust_remote_code) targets transformers 4.x.
-# Env: VLLM_SPEC (pip spec for vllm, default "vllm"), SPLITS (default "train4096 dev500 test1486").
+# Env: VLLM_SPEC (pip spec for vllm, default "vllm"), SPLITS (default "train4096 test2000").
 set -euo pipefail
 cd "$(dirname "$0")/.."
 GEN_PY=.venv-gen/bin/python
 RM=models/ArmoRM-Llama3-8B-v0.1
-SPLITS="${SPLITS:-train4096 dev500 test1486}"
+SPLITS="${SPLITS:-train4096 test2000}"
 
 if [ ! -x "$GEN_PY" ]; then
   echo "=== $(date '+%F %T') creating .venv-gen with ${VLLM_SPEC:-vllm}"
