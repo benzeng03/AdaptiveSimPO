@@ -24,6 +24,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
+from adaptive_simpo import evalcache
 from adaptive_simpo.margins import FAMILIES, KINDS, MarginConfig, MomentEMA, margin_loss
 from adaptive_simpo.modeling import TRUNCATIONS, batch_logp_sums, read_jsonl
 from adaptive_simpo.rewards import DEFAULT_BETA, NEEDS_REFERENCE, REWARDS, reward_gap
@@ -74,6 +75,12 @@ def build_parser():
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--bf16", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--attn-implementation", default=None,
+                   help="attention kernel passed to from_pretrained, e.g. sdpa, flash_attention_2 "
+                        "(default: the transformers default)")
+    p.add_argument("--eval-data", nargs="*", default=[], metavar="FILE",
+                   help="after training, score the model on these pair files and cache the summed "
+                        "log-probabilities in OUTPUT/eval_cache (score_pairs.py reuses them)")
     p.add_argument("--fp32-master", choices=("auto", "gpu", "cpu", "off"), default="auto",
                    help="AdamW on fp32 copies of bf16 weights (auto: whenever a trainable weight is "
                         "below fp32, i.e. full fine-tuning in bf16; cpu: keep the copies and moments "
@@ -104,7 +111,7 @@ def variant_name(args, cfg):
 
 
 # Arguments that may differ between an interrupted run and its resumption.
-RESUME_FREE = {"output", "resume", "checkpoint_every", "device", "max_steps"}
+RESUME_FREE = {"output", "resume", "checkpoint_every", "device", "max_steps", "eval_data"}
 
 
 def save_checkpoint(output, model, optimizer, scheduler, state):
@@ -198,10 +205,13 @@ def main(argv=None):
                         generator=torch.Generator().manual_seed(args.seed))
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     dtype = torch.bfloat16 if args.bf16 else torch.float32
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=dtype).to(args.device)
+    load = dict(dtype=dtype)
+    if args.attn_implementation:
+        load["attn_implementation"] = args.attn_implementation
+    model = AutoModelForCausalLM.from_pretrained(args.model, **load).to(args.device)
     reference = None  # frozen base model for DPO / R-DPO under full fine-tuning
     if args.reward in NEEDS_REFERENCE and not args.lora:
-        reference = AutoModelForCausalLM.from_pretrained(args.model, dtype=dtype).to(args.device).eval()
+        reference = AutoModelForCausalLM.from_pretrained(args.model, **load).to(args.device).eval()
         reference.requires_grad_(False)
     if args.lora:
         from peft import LoraConfig, get_peft_model
@@ -313,6 +323,20 @@ def main(argv=None):
 
     model.save_pretrained(output)
     tokenizer.save_pretrained(output)
+    if args.eval_data:
+        # score the trained model while it is loaded; score_pairs.py reads these instead of reloading it
+        model.eval()
+        enc = (args.max_length, args.max_prompt, args.chat_prompt, args.truncation)
+        for path in args.eval_data:
+            eval_rows = read_jsonl(path)
+            started = time.time()
+            with torch.no_grad():
+                parts = [[t.float().cpu() for t in batch_logp_sums(
+                    model, eval_rows[i:i + args.batch_size], tokenizer, args.max_length, args.max_prompt,
+                    args.device, args.chat_prompt, truncation=args.truncation)]
+                    for i in range(0, len(eval_rows), args.batch_size)]
+            evalcache.save(output, path, enc, [torch.cat(col) for col in zip(*parts)])
+            print(f"[train] scored {len(eval_rows)} pairs of {path} ({time.time() - started:.0f} s)", flush=True)
     summary = dict(variant=variant, reward=args.reward, beta=args.beta, margin=cfg.to_dict(), steps=step, pairs_seen=totals["n"],
                    seconds=round(elapsed + time.time() - start, 1),
                    gamma_mean=totals["gamma"] / totals["n"],

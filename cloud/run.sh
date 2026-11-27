@@ -22,6 +22,8 @@
 #   --fp32-master MODE      full fine-tuning: cpu (master weights + Adam moments in RAM, ~1 s/step slower) | gpu (peak 20.8 of 22 GiB on an L4)  [cpu]
 #   --run-dir DIR           [outputs/run-<full->bs<B>-lr<LR|grid>-ep<E>-seed<S>-L<len>-<time>]
 #   --epochs --batch-size --seed --beta --dpo-beta          [1, 16, 42, 2, 0.1]
+#   --attn IMPL --no-grad-ckpt   attention kernel for training (e.g. flash_attention_2) [transformers default];
+#                           train without gradient checkpointing [on]
 #   --schedule MODE         constant | cosine (SimPO: linear warmup over the first 10% of updates, then cosine decay, grad-norm clip 1)  [constant]
 #   --max-length N --max-prompt N                           [384, 192]
 #   --no-length-limit       same as --max-length 8192 --max-prompt 4096 (longer than every pair)
@@ -44,13 +46,13 @@ PY="${PY:-.venv/bin/python}"
 
 VARIANTS="fixed:0 fixed:1 fixed:2 calibrated"
 RUN_DIR=""; LRS=0.0001; EPOCHS=1; BS=16; SEED=42; BETA=2; DPO_BETA=0.1; FULL=0; MASTER=cpu; SCHEDULE=constant
-TEMP=0.9; TOP_P=1; TOP_K=0
+TEMP=0.9; TOP_P=1; TOP_K=0; ATTN=""; GRAD_CKPT=1
 MAX_LEN=384; MAX_PROMPT=192; TRUNC=always
 ALPACA=128; ARENA=0; GROUP=16; MAX_NEW=4096; BASELINE=""; CKPT_EVERY=32
 SKIP_TRAIN=0; SKIP_GEN=0; SHUTDOWN=0
 TRAIN_DATA=data/uf_train4096.jsonl; DEV_DATA=data/uf_dev500.jsonl; TEST_DATA=data/uf_test1486.jsonl
 
-usage() { sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --variants) VARIANTS="$2"; shift ;;
@@ -64,6 +66,8 @@ while [ $# -gt 0 ]; do
     --beta) BETA="$2"; shift ;;
     --dpo-beta) DPO_BETA="$2"; shift ;;
     --schedule) SCHEDULE="$2"; shift ;;
+    --attn) ATTN="$2"; shift ;;
+    --no-grad-ckpt) GRAD_CKPT=0 ;;
     --temperature) TEMP="$2"; shift ;;
     --top-p) TOP_P="$2"; shift ;;
     --top-k) TOP_K="$2"; shift ;;
@@ -142,9 +146,11 @@ for lr in "${lrs[@]}"; do
 done
 model_args=""
 [ "$FULL" = 1 ] && model_args="--no-lora --fp32-master $MASTER"
+[ -n "$ATTN" ] && model_args="$model_args --attn-implementation $ATTN"
+[ "$GRAD_CKPT" = 0 ] && model_args="$model_args --no-gradient-checkpointing"
 echo "[run] $(date '+%F %T')  run dir $RUN_DIR"
 echo "[run] ${#names[@]} variants ${names[*]}"
-echo "[run] $([ "$FULL" = 1 ] && echo "full fine-tuning (fp32 masters on $MASTER)" || echo LoRA) | lr ${lrs[*]}, epochs $EPOCHS, batch $BS, seed $SEED, beta $BETA (dpo $DPO_BETA), schedule $SCHEDULE, max length $MAX_LEN, max prompt $MAX_PROMPT, truncation $TRUNC"
+echo "[run] $([ "$FULL" = 1 ] && echo "full fine-tuning (fp32 masters on $MASTER)" || echo LoRA) | lr ${lrs[*]}, epochs $EPOCHS, batch $BS, seed $SEED, beta $BETA (dpo $DPO_BETA), schedule $SCHEDULE, attention ${ATTN:-default}, gradient checkpointing $([ "$GRAD_CKPT" = 1 ] && echo on || echo off), max length $MAX_LEN, max prompt $MAX_PROMPT, truncation $TRUNC"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 "$PY" -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; print('[run] torch', torch.__version__, torch.cuda.get_device_name(0))"
 
@@ -158,7 +164,7 @@ if [ "$SKIP_TRAIN" = 0 ]; then
     # shellcheck disable=SC2086
     "$PY" -u train.py --data "$TRAIN_DATA" --batch-size "$BS" --seed "$SEED" --schedule "$SCHEDULE" \
       --epochs "$EPOCHS" --max-length "$MAX_LEN" --max-prompt "$MAX_PROMPT" --truncation "$TRUNC" ${train_args[$i]} $model_args \
-      --checkpoint-every "$CKPT_EVERY" --resume ${EXTRA_TRAIN_ARGS:-} --output "$out"
+      --checkpoint-every "$CKPT_EVERY" --resume --eval-data "$DEV_DATA" "$TEST_DATA" ${EXTRA_TRAIN_ARGS:-} --output "$out"
   done
 fi
 

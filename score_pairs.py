@@ -9,7 +9,8 @@ also report accuracy_mean_logp, the accuracy of the length-normalised gap, which
 across rewards. Writes RUN/<split>_scores.json and RUN/<split>_scores.csv. With --split dev (the
 default) the fixed-margin SimPO adapter with the highest accuracy is selected, ties broken by
 lower log-loss and then smaller gamma, and written to RUN/selection.json. --split test and --split train (the training pairs,
-for training accuracy) only report.
+for training accuracy) only report. A model trained with train.py --eval-data on the same file
+(same content and lengths) is not loaded again: its cached log-probabilities are used.
 """
 import argparse
 import csv
@@ -19,6 +20,7 @@ from pathlib import Path
 import torch
 from torch.nn import functional as F
 
+from adaptive_simpo import evalcache
 from adaptive_simpo.modeling import Policies, batch_logp_sums, is_policy_dir, read_jsonl
 from adaptive_simpo.rewards import NEEDS_REFERENCE, reward_gap
 
@@ -70,6 +72,11 @@ def main(argv=None):
 
     def table(name, cfg):
         enc = (cfg["max_length"], cfg["max_prompt"], cfg.get("chat_prompt", True), cfg.get("truncation", "always"))
+        if (name, enc) not in tables and name != "base":
+            cached = evalcache.load(args.run / name, args.data, enc)  # written by train.py --eval-data
+            if cached is not None:
+                print(f"[{args.split}] {name}: log-probabilities cached at the end of training", flush=True)
+                tables[(name, enc)] = cached
         if (name, enc) not in tables:
             parts = []
             with policies.use(name) as model:

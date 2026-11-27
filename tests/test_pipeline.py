@@ -1,6 +1,7 @@
 """CPU smoke test: train -> dev/test scoring -> summary -> generation with a tiny random Qwen3."""
 import json
 import math
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -81,6 +82,26 @@ class PipelineSmokeTest(unittest.TestCase):
             self.assertNotAlmostEqual(first_rdpo["reward_gap"], 0.0, places=4)  # the length offset alone
             orpo = json.loads((rw_run / "orpo-l0.1-calibrated" / "metrics.jsonl").read_text().splitlines()[0])
             self.assertAlmostEqual(orpo["loss"], orpo["nll"] + 0.1 * orpo["pref_loss"], places=5)
+            # train.py --eval-data caches the trained model's log-probabilities; score_pairs.py uses
+            # them instead of loading the model, with the same result as scoring from scratch
+            from adaptive_simpo import evalcache
+            ev_run = tmp / "eval-run"
+            train.main(common + ["--margin", "fixed", "--gamma", "1", "--max-steps", "2", "--eval-data", str(dev),
+                                 "--output", str(ev_run / "fixed-g1")])
+            self.assertEqual(len(list((ev_run / "fixed-g1" / "eval_cache").glob("*.pt"))), 1)
+            score_pairs.main([str(ev_run), "--split", "test", "--data", str(dev), "--batch-size", "2", "--no-base"])
+            cached_gaps = json.loads((ev_run / "test_scores.json").read_text())[0]["gaps"]
+            enc = (96, 48, True, "always")
+            self.assertIsNotNone(evalcache.load(ev_run / "fixed-g1", dev, enc))
+            self.assertIsNone(evalcache.load(ev_run / "fixed-g1", dev, (96, 40, True, "always")))  # other lengths
+            shutil.rmtree(ev_run / "fixed-g1" / "eval_cache")
+            score_pairs.main([str(ev_run), "--split", "test", "--data", str(dev), "--batch-size", "2", "--no-base"])
+            fresh_gaps = json.loads((ev_run / "test_scores.json").read_text())[0]["gaps"]
+            torch.testing.assert_close(torch.tensor(cached_gaps), torch.tensor(fresh_gaps), atol=1e-5, rtol=1e-5)
+            other = tmp / "dev-other.jsonl"
+            other.write_text(dev.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+            self.assertIsNone(evalcache.load(ev_run / "fixed-g1", other, enc))  # other file content
+
             # full fine-tuning keeps a frozen copy of the base model as the reference: the first
             # step starts from the reference exactly, so the loss is log 2 again
             full_run = tmp / "full-dpo-run"
