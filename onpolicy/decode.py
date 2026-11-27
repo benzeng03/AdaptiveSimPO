@@ -23,7 +23,8 @@ SEEDS = (13, 21, 42, 79, 100)
 def read_prompts(path):
     """Unique prompts in order of first appearance."""
     seen, prompts = set(), []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
+    # iterate the file, not str.splitlines(): that also splits at U+2028 / U+2029 inside JSON strings
+    for line in open(path, encoding="utf-8"):
         if line.strip():
             p = json.loads(line)["prompt"]
             if p not in seen:

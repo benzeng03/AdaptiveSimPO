@@ -46,6 +46,25 @@ class AnnotateTests(unittest.TestCase):
             self.assertEqual(len(calls), 6)
             self.assertEqual(again, pairs)
 
+    def test_unicode_line_separators_inside_strings(self):
+        # U+2028 / U+2029 are line breaks for str.splitlines() but ordinary characters in JSON lines
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            odd = "first second third"
+            data = tmp / "prompts.jsonl"
+            data.write_text(json.dumps(dict(prompt=odd), ensure_ascii=False) + "\n"
+                            + json.dumps(dict(prompt="plain"), ensure_ascii=False) + "\n", encoding="utf-8")
+            self.assertEqual(decode.read_prompts(data), [odd, "plain"])
+            for seed, text in ((1, odd), (2, "other")):
+                (tmp / f"output_{seed}.jsonl").write_text(
+                    json.dumps(dict(prompt=odd, generated_text=text), ensure_ascii=False) + "\n", encoding="utf-8")
+            records, _ = annotate.combine(tmp)
+            self.assertEqual(records[0]["all_generated_responses"], [odd, "other"])
+            cache = tmp / "c.scores.jsonl"
+            first = annotate.annotate(records, lambda p, a: float(len(a)), cache)
+            again = annotate.annotate(records, lambda p, a: 1 / 0, cache)  # all cached: no scoring call
+            self.assertEqual(first, again)
+
     def test_mismatched_seed_files_are_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

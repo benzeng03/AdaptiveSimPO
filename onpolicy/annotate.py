@@ -23,7 +23,8 @@ def combine(input_dir):
     files = sorted(Path(input_dir).glob("output_*.jsonl"), key=lambda f: int(f.stem.split("_")[1]))
     if len(files) < 2:
         raise SystemExit(f"{input_dir}: need at least two output_<seed>.jsonl files, found {len(files)}")
-    runs = [[json.loads(l) for l in f.read_text(encoding="utf-8").splitlines() if l.strip()] for f in files]
+    # iterate the file, not str.splitlines(): that also splits at U+2028 / U+2029 inside JSON strings
+    runs = [[json.loads(l) for l in open(f, encoding="utf-8") if l.strip()] for f in files]
     if len({len(r) for r in runs}) != 1:
         raise SystemExit(f"{input_dir}: seed files have different lengths")
     records, identical = [], 0
@@ -74,7 +75,7 @@ def annotate(records, score, cache):
     """Score every answer (reusing cached prompts) and binarize."""
     done = {}
     if cache.exists():
-        for line in cache.read_text(encoding="utf-8").splitlines():
+        for line in open(cache, encoding="utf-8"):
             r = json.loads(line)
             done[r["prompt"]] = r["scores"]
     out = []
