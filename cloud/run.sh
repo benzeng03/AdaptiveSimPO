@@ -11,15 +11,18 @@
 #   bash cloud/run.sh --run-dir outputs/run-X <same options>   # resume after an interruption
 #
 # Options (defaults = the reported setup):
-#   --variants "SPEC ..."   space-separated fixed:<gamma> | calibrated[-logistic][-ema:<decay>]   ["fixed:0 fixed:1 fixed:2 calibrated"]
+#   --variants "SPEC ..."   space-separated fixed:<gamma> | calibrated[-logistic][-ema:<decay>] | dpo-fixed:<gamma> | dpo-calibrated
+#                           ["fixed:0 fixed:1 fixed:2 calibrated"]
 #                           (calibrated-ema:0.9 = train.py --k-ema 0.9, named calibrated-ema0.9;
-#                            calibrated-logistic = --k-family logistic; calibrated-logistic-ema:0.9 both)
+#                            calibrated-logistic = --k-family logistic; calibrated-logistic-ema:0.9 both;
+#                            dpo-* = --reward dpo (DPO reward gap, beta --dpo-beta), named dpo-calibrated, dpo-fixed-g0)
 #   --lr "LR ..."           one or more learning rates; with several, every variant is trained at each
 #                           and named <variant>-lr<LR>, e.g. fixed-g2-lr1e-05            [1e-4]
 #   --full                  full fine-tuning instead of LoRA (fp32 master weights, see train.py)
 #   --fp32-master MODE      full fine-tuning: cpu (master weights + Adam moments in RAM, ~1 s/step slower) | gpu (peak 20.8 of 22 GiB on an L4)  [cpu]
 #   --run-dir DIR           [outputs/run-<full->bs<B>-lr<LR|grid>-ep<E>-seed<S>-L<len>-<time>]
-#   --epochs --batch-size --seed --beta                     [1, 16, 42, 2]
+#   --epochs --batch-size --seed --beta --dpo-beta          [1, 16, 42, 2, 0.1]
+#   --schedule MODE         constant | cosine (SimPO: linear warmup over the first 10% of updates, then cosine decay, grad-norm clip 1)  [constant]
 #   --max-length N --max-prompt N                           [384, 192]
 #   --no-length-limit       same as --max-length 8192 --max-prompt 4096 (longer than every pair)
 #   --truncation MODE       always (cut every prompt to --max-prompt) | simpo (cut only pairs over --max-length, as SimPO)  [always]
@@ -27,6 +30,7 @@
 #   --alpaca N              AlpacaEval prompts to generate, 0 = none; 805 = full set   [128]
 #   --arena N               Arena-Hard v0.1 prompts, 0 = none; 500 = full set          [0]
 #   --group N --max-new-tokens N                            [16, 4096]
+#   --temperature T --top-p P --top-k K                     generation sampling [0.9, 1, 0 = off]; other values add -t<T>-p<P>-k<K> to the directory
 #   --baseline NAME         fixed variant to generate against [best fixed on dev+test]
 #   --checkpoint-every N    training checkpoint interval in steps (a rerun resumes from it) [32]
 #   --skip-train --skip-gen --shutdown
@@ -39,13 +43,14 @@ cd "$(dirname "$0")/.."
 PY="${PY:-.venv/bin/python}"
 
 VARIANTS="fixed:0 fixed:1 fixed:2 calibrated"
-RUN_DIR=""; LRS=0.0001; EPOCHS=1; BS=16; SEED=42; BETA=2; FULL=0; MASTER=cpu
+RUN_DIR=""; LRS=0.0001; EPOCHS=1; BS=16; SEED=42; BETA=2; DPO_BETA=0.1; FULL=0; MASTER=cpu; SCHEDULE=constant
+TEMP=0.9; TOP_P=1; TOP_K=0
 MAX_LEN=384; MAX_PROMPT=192; TRUNC=always
 ALPACA=128; ARENA=0; GROUP=16; MAX_NEW=4096; BASELINE=""; CKPT_EVERY=32
 SKIP_TRAIN=0; SKIP_GEN=0; SHUTDOWN=0
 TRAIN_DATA=data/uf_train4096.jsonl; DEV_DATA=data/uf_dev500.jsonl; TEST_DATA=data/uf_test1486.jsonl
 
-usage() { sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --variants) VARIANTS="$2"; shift ;;
@@ -57,6 +62,11 @@ while [ $# -gt 0 ]; do
     --batch-size) BS="$2"; shift ;;
     --seed) SEED="$2"; shift ;;
     --beta) BETA="$2"; shift ;;
+    --dpo-beta) DPO_BETA="$2"; shift ;;
+    --schedule) SCHEDULE="$2"; shift ;;
+    --temperature) TEMP="$2"; shift ;;
+    --top-p) TOP_P="$2"; shift ;;
+    --top-k) TOP_K="$2"; shift ;;
     --max-length) MAX_LEN="$2"; shift ;;
     --max-prompt) MAX_PROMPT="$2"; shift ;;
     --no-length-limit) MAX_LEN=8192; MAX_PROMPT=4096 ;;
@@ -85,6 +95,7 @@ if [ "$SHUTDOWN" = 1 ]; then
   trap 'echo "[run] powering off in 120 s (Ctrl-C to cancel)"; sleep 120; sudo shutdown -h now' EXIT
 fi
 case "$MASTER" in gpu|cpu) ;; *) echo "--fp32-master must be gpu or cpu" >&2; exit 2 ;; esac
+case "$SCHEDULE" in constant|cosine) ;; *) echo "--schedule must be constant or cosine" >&2; exit 2 ;; esac
 [ -x "$PY" ] || [ -f "$PY" ] || { echo "missing interpreter $PY (run cloud/setup.sh)" >&2; exit 1; }
 for f in "$TRAIN_DATA" "$DEV_DATA" "$TEST_DATA"; do
   [ -f "$f" ] || { echo "missing data file $f (cloud/GUIDE.zh.md, step 4)" >&2; exit 1; }
@@ -104,22 +115,28 @@ fi
 mkdir -p "$RUN_DIR"
 exec > >(tee -a "$RUN_DIR/run.log") 2>&1
 
+# train.py names a DPO variant dpo-<margin>, with -b<beta> when beta is not its default 0.1
+dpo_tag() { [ "$(printf '%g' "$DPO_BETA")" = 0.1 ] || printf -- '-b%g' "$DPO_BETA"; }
 names=(); train_args=()
 for lr in "${lrs[@]}"; do
   suffix=""; [ ${#lrs[@]} -gt 1 ] && suffix="-lr$(printf '%g' "$lr")"
   for spec in $VARIANTS; do
     case "$spec" in
-      calibrated) names+=("calibrated$suffix"); train_args+=("--lr $lr --margin calibrated") ;;
+      calibrated) names+=("calibrated$suffix"); train_args+=("--lr $lr --beta $BETA --margin calibrated") ;;
       calibrated-ema:*) b=$(printf '%g' "${spec#calibrated-ema:}"); names+=("calibrated-ema$b$suffix")
-               train_args+=("--lr $lr --margin calibrated --k-ema $b") ;;
+               train_args+=("--lr $lr --beta $BETA --margin calibrated --k-ema $b") ;;
       calibrated-logistic) names+=("calibrated-logistic$suffix")
-               train_args+=("--lr $lr --margin calibrated --k-family logistic") ;;
+               train_args+=("--lr $lr --beta $BETA --margin calibrated --k-family logistic") ;;
       calibrated-logistic-ema:*) b=$(printf '%g' "${spec#calibrated-logistic-ema:}")
                names+=("calibrated-logistic-ema$b$suffix")
-               train_args+=("--lr $lr --margin calibrated --k-family logistic --k-ema $b") ;;
+               train_args+=("--lr $lr --beta $BETA --margin calibrated --k-family logistic --k-ema $b") ;;
       fixed:*) g=$(printf '%g' "${spec#fixed:}"); names+=("fixed-g$g$suffix")
-               train_args+=("--lr $lr --margin fixed --gamma $g") ;;
-      *) echo "unknown variant $spec (use fixed:<gamma> or calibrated[-logistic][-ema:<decay>])" >&2; exit 2 ;;
+               train_args+=("--lr $lr --beta $BETA --margin fixed --gamma $g") ;;
+      dpo-calibrated) names+=("dpo$(dpo_tag)-calibrated$suffix")
+               train_args+=("--lr $lr --reward dpo --beta $DPO_BETA --margin calibrated") ;;
+      dpo-fixed:*) g=$(printf '%g' "${spec#dpo-fixed:}"); names+=("dpo$(dpo_tag)-fixed-g$g$suffix")
+               train_args+=("--lr $lr --reward dpo --beta $DPO_BETA --margin fixed --gamma $g") ;;
+      *) echo "unknown variant $spec (use fixed:<gamma>, calibrated[-logistic][-ema:<decay>], dpo-fixed:<gamma> or dpo-calibrated)" >&2; exit 2 ;;
     esac
   done
 done
@@ -127,7 +144,7 @@ model_args=""
 [ "$FULL" = 1 ] && model_args="--no-lora --fp32-master $MASTER"
 echo "[run] $(date '+%F %T')  run dir $RUN_DIR"
 echo "[run] ${#names[@]} variants ${names[*]}"
-echo "[run] $([ "$FULL" = 1 ] && echo "full fine-tuning (fp32 masters on $MASTER)" || echo LoRA) | lr ${lrs[*]}, epochs $EPOCHS, batch $BS, seed $SEED, beta $BETA, max length $MAX_LEN, max prompt $MAX_PROMPT, truncation $TRUNC"
+echo "[run] $([ "$FULL" = 1 ] && echo "full fine-tuning (fp32 masters on $MASTER)" || echo LoRA) | lr ${lrs[*]}, epochs $EPOCHS, batch $BS, seed $SEED, beta $BETA (dpo $DPO_BETA), schedule $SCHEDULE, max length $MAX_LEN, max prompt $MAX_PROMPT, truncation $TRUNC"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 "$PY" -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; print('[run] torch', torch.__version__, torch.cuda.get_device_name(0))"
 
@@ -139,7 +156,7 @@ if [ "$SKIP_TRAIN" = 0 ]; then
     if [ -f "$out/margin_stats.json" ]; then echo "[run] skip trained $name"; continue; fi
     echo "=== $(date '+%F %T') training $name ($((i + 1))/${#names[@]})"
     # shellcheck disable=SC2086
-    "$PY" -u train.py --data "$TRAIN_DATA" --batch-size "$BS" --seed "$SEED" --beta "$BETA" \
+    "$PY" -u train.py --data "$TRAIN_DATA" --batch-size "$BS" --seed "$SEED" --schedule "$SCHEDULE" \
       --epochs "$EPOCHS" --max-length "$MAX_LEN" --max-prompt "$MAX_PROMPT" --truncation "$TRUNC" ${train_args[$i]} $model_args \
       --checkpoint-every "$CKPT_EVERY" --resume ${EXTRA_TRAIN_ARGS:-} --output "$out"
   done
@@ -184,7 +201,10 @@ fi
 if [ "$SKIP_GEN" = 0 ] && [ ${#gen_names[@]} -gt 0 ] && { [ "$ALPACA" -gt 0 ] || [ "$ARENA" -gt 0 ]; }; then
   gen=(); for n in "${gen_names[@]}"; do gen+=(--adapter "$n=$RUN_DIR/$n"); done
   tag=""; [ "$GROUP" != 8 ] && tag="-g$GROUP"
-  common=(--train-data "$TRAIN_DATA" --seed "$SEED" --group "$GROUP" --max-new-tokens "$MAX_NEW")
+  sampling="-t$(printf '%g' "$TEMP")-p$(printf '%g' "$TOP_P")-k$TOP_K"
+  [ "$sampling" = "-t0.9-p1-k0" ] || tag="$tag$sampling"   # the default keeps the old directory names
+  common=(--train-data "$TRAIN_DATA" --seed "$SEED" --group "$GROUP" --max-new-tokens "$MAX_NEW"
+          --temperature "$TEMP" --top-p "$TOP_P" --top-k "$TOP_K")
   if [ "$ALPACA" -gt 0 ]; then
     echo "=== $(date '+%F %T') AlpacaEval generation ($ALPACA prompts: ${gen_names[*]})"
     "$PY" -u generate.py "${gen[@]}" "${common[@]}" --num-prompts "$ALPACA" \

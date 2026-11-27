@@ -81,8 +81,17 @@ class PipelineSmokeTest(unittest.TestCase):
             self.assertNotAlmostEqual(first_rdpo["reward_gap"], 0.0, places=4)  # the length offset alone
             orpo = json.loads((rw_run / "orpo-l0.1-calibrated" / "metrics.jsonl").read_text().splitlines()[0])
             self.assertAlmostEqual(orpo["loss"], orpo["nll"] + 0.1 * orpo["pref_loss"], places=5)
-            with self.assertRaises(SystemExit):  # DPO needs LoRA for its reference
-                train.main(common + ["--reward", "dpo", "--no-lora", "--output", str(tmp / "bad")])
+            # full fine-tuning keeps a frozen copy of the base model as the reference: the first
+            # step starts from the reference exactly, so the loss is log 2 again
+            full_run = tmp / "full-dpo-run"
+            train.main(common + ["--reward", "dpo", "--margin", "fixed", "--gamma", "0", "--no-lora",
+                                 "--output", str(full_run / "dpo-fixed-g0")])
+            full_dpo = [json.loads(l) for l in (full_run / "dpo-fixed-g0" / "metrics.jsonl").read_text().splitlines()]
+            self.assertAlmostEqual(full_dpo[0]["loss"], math.log(2), places=5)
+            self.assertNotAlmostEqual(full_dpo[-1]["reward_gap"], 0.0, places=6)  # the policy moved
+            score_pairs.main([str(full_run), "--split", "test", "--data", str(dev), "--batch-size", "2", "--no-base"])
+            full_scores = json.loads((full_run / "test_scores.json").read_text())
+            self.assertEqual(full_scores[0]["reward"], "dpo")
             score_pairs.main([str(rw_run), "--split", "test", "--data", str(dev), "--batch-size", "2", "--no-base"])
             rw_scores = {r["adapter"]: r for r in json.loads((rw_run / "test_scores.json").read_text())}
             self.assertEqual(rw_scores["rdpo-a0.05-fixed-g0"]["reward"], "r-dpo")
@@ -110,6 +119,15 @@ class PipelineSmokeTest(unittest.TestCase):
             first = json.loads((gen / "000-fixed-g0.5.json").read_text(encoding="utf-8"))
             self.assertEqual(len(first), 2)
             self.assertLessEqual(first[0]["tokens"], 4)
+            # a cache made with other sampling settings is refused, not mixed in
+            with self.assertRaises(SystemExit):
+                generate.main(args + ["--top-k", "20"])
+            topk = run / "gen-k20"
+            generate.main([a if a != str(gen) else str(topk) for a in args]
+                          + ["--temperature", "0.7", "--top-p", "0.8", "--top-k", "20"])
+            meta = json.loads((topk / "prompts.json").read_text(encoding="utf-8"))
+            self.assertEqual((meta["temperature"], meta["top_p"], meta["top_k"]), (0.7, 0.8, 20))
+            self.assertEqual(len(list(topk.glob("*-*.json"))), 6)
 
     def test_resume_matches_uninterrupted(self):
         """Kill training mid-run, resume from the checkpoint, and get the same run as without the kill."""

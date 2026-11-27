@@ -63,6 +63,7 @@ def main(argv=None):
     p.add_argument("--group", type=int, default=8)
     p.add_argument("--temperature", type=float, default=0.9)
     p.add_argument("--top-p", type=float, default=1.0)
+    p.add_argument("--top-k", type=int, default=0, help="0 = no top-k filtering")
     p.add_argument("--max-new-tokens", type=int, default=4096)
     p.add_argument("--device", default="cuda")
     p.add_argument("--gpu-mem-fraction", type=float, default=0.9,
@@ -86,9 +87,19 @@ def main(argv=None):
     data = load_eval_data(args.eval_data)
     indices = eval_indices(data, read_jsonl(args.train_data), args.num_prompts, args.seed)
     args.output.mkdir(parents=True, exist_ok=True)
-    (args.output / "prompts.json").write_text(json.dumps(dict(
-        indices=indices, seed=args.seed, temperature=args.temperature, top_p=args.top_p,
-        max_new_tokens=args.max_new_tokens, policies={n: str(adapters.get(n, "base")) for n in names},
+    meta = args.output / "prompts.json"
+    sampling = dict(seed=args.seed, temperature=args.temperature, top_p=args.top_p, top_k=args.top_k,
+                    max_new_tokens=args.max_new_tokens)
+    if meta.exists():
+        # cached group files are reused by name, so they must come from the same sampling settings
+        old = json.loads(meta.read_text(encoding="utf-8"))
+        old.setdefault("top_k", 0)  # written before --top-k existed, when top-k was always off
+        diff = {k: (old.get(k), v) for k, v in sampling.items() if old.get(k) != v}
+        if diff or old.get("indices") != indices:
+            raise SystemExit(f"{args.output} holds generations made with other settings "
+                             f"{diff or '(different prompts)'}; use another --output")
+    meta.write_text(json.dumps(dict(
+        indices=indices, **sampling, policies={n: str(adapters.get(n, "base")) for n in names},
     ), indent=2), encoding="utf-8")
 
     tok = AutoTokenizer.from_pretrained(args.model, padding_side="left")
@@ -114,7 +125,7 @@ def main(argv=None):
             if args.max_new and new >= args.max_new:
                 break
             torch.manual_seed(args.seed + g)
-            gen_kwargs = dict(do_sample=True, temperature=args.temperature, top_p=args.top_p, top_k=0,
+            gen_kwargs = dict(do_sample=True, temperature=args.temperature, top_p=args.top_p, top_k=args.top_k,
                               max_new_tokens=args.max_new_tokens, pad_token_id=tok.pad_token_id)
             with policies.use(name) as model:
                 seq = model.generate(**batch, **gen_kwargs)

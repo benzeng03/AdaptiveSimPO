@@ -3,7 +3,8 @@ calibrated) applied to a reward gap (--reward simpo, dpo, dpo-noref, r-dpo or or
 adaptive_simpo/rewards.py). The loss is softplus(gamma_i - r_i), plus the chosen answer's NLL for ORPO.
 
 DPO and R-DPO use summed log-probabilities and the frozen base model as reference: with LoRA the
-reference is the same model with the adapter disabled, so no second copy is loaded.
+reference is the same model with the adapter disabled, so no second copy is loaded; with full
+fine-tuning a frozen copy of the base model is kept on the device.
 
 Every variant shares the model, data, shuffling order, LoRA initialisation and
 optimiser settings for a given --seed, so only the margin rule differs.
@@ -158,8 +159,6 @@ def main(argv=None):
         args.beta = DEFAULT_BETA[args.reward]
     if not (math.isfinite(args.beta) and args.beta > 0):
         parser.error("beta must be positive and finite")
-    if args.reward in NEEDS_REFERENCE and not args.lora:
-        parser.error(f"--reward {args.reward} needs --lora (the reference is the model with the adapter disabled)")
     if not math.isfinite(args.rdpo_alpha) or not (math.isfinite(args.orpo_lambda) and args.orpo_lambda >= 0):
         parser.error("rdpo-alpha must be finite and orpo-lambda finite and >= 0")
     if args.k_ema and args.margin != "calibrated":
@@ -200,6 +199,10 @@ def main(argv=None):
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     dtype = torch.bfloat16 if args.bf16 else torch.float32
     model = AutoModelForCausalLM.from_pretrained(args.model, dtype=dtype).to(args.device)
+    reference = None  # frozen base model for DPO / R-DPO under full fine-tuning
+    if args.reward in NEEDS_REFERENCE and not args.lora:
+        reference = AutoModelForCausalLM.from_pretrained(args.model, dtype=dtype).to(args.device).eval()
+        reference.requires_grad_(False)
     if args.lora:
         from peft import LoraConfig, get_peft_model
         model = get_peft_model(model, LoraConfig(
@@ -253,8 +256,12 @@ def main(argv=None):
                 cs, rs, cl, rl = batch_logp_sums(model, pairs, **encode)
                 ref = {}
                 if args.reward in NEEDS_REFERENCE:
-                    with torch.no_grad(), model.disable_adapter():
-                        ref_cs, ref_rs, _, _ = batch_logp_sums(model, pairs, **encode)
+                    with torch.no_grad():
+                        if reference is not None:
+                            ref_cs, ref_rs, _, _ = batch_logp_sums(reference, pairs, **encode)
+                        else:
+                            with model.disable_adapter():
+                                ref_cs, ref_rs, _, _ = batch_logp_sums(model, pairs, **encode)
                     ref = dict(ref_chosen_sum=ref_cs, ref_rejected_sum=ref_rs)
                 gaps = reward_gap(args.reward, args.beta, cs, rs, cl, rl, alpha=args.rdpo_alpha, **ref)
                 loss, scores, gamma, stats = margin_loss(gaps, cfg, ema)
