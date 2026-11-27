@@ -9,3 +9,4 @@ tokenizers==0.23.3
 numpy==2.5.5
 pyarrow==26.0.1
 matplotlib==3.11.2  # research/plot_figures.py only
+kernels==0.18.2  # FlashAttention-2 from the Hugging Face kernel hub (train.py --attn-implementation flash_attention_2)

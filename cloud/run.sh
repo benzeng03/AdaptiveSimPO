@@ -11,11 +11,11 @@
 #   bash cloud/run.sh --run-dir outputs/run-X <same options>   # resume after an interruption
 #
 # Options (defaults = the reported setup):
-#   --variants "SPEC ..."   space-separated fixed:<gamma> | calibrated[-logistic][-ema:<decay>] | dpo-fixed:<gamma> | dpo-calibrated
+#   --variants "SPEC ..."   space-separated fixed:<gamma> | calibrated[-logistic][-ema:<decay>] | dpo-fixed:<gamma> | dpo-calibrated[-ema:<decay>]
 #                           ["fixed:0 fixed:1 fixed:2 calibrated"]
 #                           (calibrated-ema:0.9 = train.py --k-ema 0.9, named calibrated-ema0.9;
 #                            calibrated-logistic = --k-family logistic; calibrated-logistic-ema:0.9 both;
-#                            dpo-* = --reward dpo (DPO reward gap, beta --dpo-beta), named dpo-calibrated, dpo-fixed-g0)
+#                            dpo-* = --reward dpo (DPO reward gap, beta --dpo-beta), named dpo-calibrated, dpo-calibrated-ema0.9, dpo-fixed-g0)
 #   --lr "LR ..."           one or more learning rates; with several, every variant is trained at each
 #                           and named <variant>-lr<LR>, e.g. fixed-g2-lr1e-05            [1e-4]
 #   --full                  full fine-tuning instead of LoRA (fp32 master weights, see train.py)
@@ -138,9 +138,11 @@ for lr in "${lrs[@]}"; do
                train_args+=("--lr $lr --beta $BETA --margin fixed --gamma $g") ;;
       dpo-calibrated) names+=("dpo$(dpo_tag)-calibrated$suffix")
                train_args+=("--lr $lr --reward dpo --beta $DPO_BETA --margin calibrated") ;;
+      dpo-calibrated-ema:*) b=$(printf '%g' "${spec#dpo-calibrated-ema:}"); names+=("dpo$(dpo_tag)-calibrated-ema$b$suffix")
+               train_args+=("--lr $lr --reward dpo --beta $DPO_BETA --margin calibrated --k-ema $b") ;;
       dpo-fixed:*) g=$(printf '%g' "${spec#dpo-fixed:}"); names+=("dpo$(dpo_tag)-fixed-g$g$suffix")
                train_args+=("--lr $lr --reward dpo --beta $DPO_BETA --margin fixed --gamma $g") ;;
-      *) echo "unknown variant $spec (use fixed:<gamma>, calibrated[-logistic][-ema:<decay>], dpo-fixed:<gamma> or dpo-calibrated)" >&2; exit 2 ;;
+      *) echo "unknown variant $spec (use fixed:<gamma>, calibrated[-logistic][-ema:<decay>], dpo-fixed:<gamma> or dpo-calibrated[-ema:<decay>])" >&2; exit 2 ;;
     esac
   done
 done
