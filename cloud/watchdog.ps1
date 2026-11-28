@@ -117,8 +117,10 @@ if (-not $Once) {
 }
 Write-Log "watchdog started: $Instance in $Zone, every $IntervalMinutes min"
 $failedStarts = 0
+$missing = 0
 while ($true) {
   $status = Get-Status $Zone
+  if ($status -ne "MISSING") { $missing = 0 }
   if ($status -eq "TERMINATED") {
     $ev = Get-LastEvent $Zone
     $type = if ($ev) { $ev.type } else { "unknown" }
@@ -139,8 +141,14 @@ while ($true) {
       }
     }
   } elseif ($status -eq "MISSING") {
-    Write-Log "instance $Instance not found in ${Zone}: watchdog exits"
-    break
+    # a single failed describe call is often transient (network, token refresh): exit only after
+    # three checks in a row find no instance
+    $missing++
+    if ($missing -ge 3 -or $Once) {
+      Write-Log "instance $Instance not found in ${Zone} ($missing checks in a row): watchdog exits"
+      break
+    }
+    Write-Log "instance $Instance not found in ${Zone} ($missing/3); checking again"
   } elseif ($Once) {
     $ev = Get-LastEvent $Zone
     Write-Log "status $status, last lifecycle event $(if ($ev) { "$($ev.type) at $($ev.time)" } else { 'none' })"
